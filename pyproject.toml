@@ -1,0 +1,30 @@
+[project]
+name = "trade-quant"
+version = "0.1.0"
+description = "Paper-trading day-trade scout: Claude skills that scan, filter, simulate, size and risk-check opening-range breakouts, with a KPI journal."
+readme = "README.md"
+requires-python = ">=3.11"
+# The tools themselves are standard-library Python: nothing to install to run them.
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<10",
+    "ruff>=0.11,<1",
+]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# The trader-* skills are vendored upstream code (MIT); lint only our own.
+exclude = [".claude/skills/trader-*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]

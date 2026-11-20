@@ -1,0 +1,14 @@
+# Runtime state: config, plans, orders, scout runs and the paper journal
+trader/
+
+# Environment and credentials
+.env
+.env.*
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
