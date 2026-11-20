@@ -34,7 +34,15 @@ OPEN_MIN = 9 * 60 + 30
 
 
 def journal_path(trader_dir: Path) -> Path:
-    return trader_dir / "journal" / "trades.jsonl"
+    """trader/journal/trades.jsonl, or <repo>/<journal_dir>/trades.jsonl when the config sets
+    journal_dir (relative to the folder that holds trader/), so the history can be committed."""
+    try:
+        cfg = json.loads((trader_dir / "config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        cfg = {}
+    jd = cfg.get("journal_dir") if isinstance(cfg, dict) else None
+    base = trader_dir.parent / str(jd) if jd else trader_dir / "journal"
+    return base / "trades.jsonl"
 
 
 def load(trader_dir: Path) -> list[dict[str, Any]]:

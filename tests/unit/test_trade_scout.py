@@ -506,3 +506,14 @@ def test_paper_pick_when_no_high(tmp_path: Path) -> None:
     scout.step_pick(opts, [good, weak])
     assert good.tier == scout.PICK
     assert weak.tier == scout.WATCH
+
+
+def test_journal_dir_in_config_moves_the_journal(tmp_path: Path) -> None:
+    import journal  # type: ignore[import-not-found]
+
+    trader = tmp_path / "trader"
+    trader.mkdir()
+    (trader / "config.json").write_text(json.dumps({"journal_dir": "journal"}))
+    assert journal.journal_path(trader) == tmp_path / "journal" / "trades.jsonl"
+    (trader / "config.json").write_text("{}")
+    assert journal.journal_path(trader) == trader / "journal" / "trades.jsonl"

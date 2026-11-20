@@ -28,7 +28,7 @@
     "top": 2,
     "min_price": 5,
     "max_price": 150,
-    "position_caps": "85:75,70:60,55:45,0:10",
+    "position_caps": "85:75,70:60,55:45,0:25",
     "max_chase_pct": 1.0,
     "or_minutes": 5,
     "min_rvol": 1.0,
@@ -37,5 +37,6 @@
     "require_above_vwap": true,
     "daily_pick": true
   },
-  "sec_user_agent": "Your Name you@example.com"
+  "sec_user_agent": "Your Name you@example.com",
+  "journal_dir": "journal"
 }

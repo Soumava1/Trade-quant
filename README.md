@@ -61,8 +61,9 @@ cp config/config.example.json trader/config.json   # then edit your limits
 python3 .claude/skills/trader-scanner/scan.py universe   # stock list, refresh weekly
 ```
 
-`trader/` holds your config, scan runs and journal. It is gitignored and never
-committed. Put your name and email in `sec_user_agent`, or in the
+`trader/` holds your config and scan runs. It is gitignored and never
+committed. The paper journal lives in `journal/trades.jsonl` (set by
+`journal_dir` in the config) so its history is kept in git. Put your name and email in `sec_user_agent`, or in the
 `SEC_USER_AGENT` environment variable, to include SEC filings: the SEC asks
 every tool that reads EDGAR to identify itself.
 
@@ -75,7 +76,7 @@ The example config is set up for a $1,000 paper account:
 | Trades | 2 a day |
 | Reward:risk | at least 2:1 |
 | Prices | $5 to $150 |
-| Position cap by score | 85+ → 75%, 70+ → 60%, 55+ → 45%, otherwise 10% |
+| Position cap by score | 85+ → 75%, 70+ → 60%, 55+ → 45%, otherwise (paper picks) 25% |
 
 ## Use
 
@@ -99,6 +100,11 @@ python3 .claude/skills/trade-scout/journal.py report             # the KPIs
 5-minute range and 9:50 AM for the 15-minute one. Most breakouts happen before
 about 10:45, and late entries can still be found until 3:30 PM. A full scan
 takes 5 to 10 minutes.
+
+**Scheduled runs:** Claude runs the scout on trading days at 9:47, 9:58,
+10:12, 10:27 and 10:44 AM and 12:33 PM New York time, and settles the journal
+at 4:07 PM. It posts each summary and commits the journal to `main`. Entries
+before 9:45 are blocked by the config, so 9:47 is the first useful scan.
 
 **To take a trade on paper:** run `/trader-risk` on it (which records the
 PASS), then `/trader-broker`. It needs your explicit yes and a connected
@@ -129,6 +135,7 @@ fills (slippage at the open) will be worse than the replays.
 .claude/skills/trade-scout/  scout.py (pipeline), features.py (stocks in play), journal.py (KPIs), SKILL.md
 .claude/agents/trade-scout.md
 config/config.example.json   starting limits for trader/config.json
+journal/trades.jsonl         the paper journal (picks and their settled outcomes)
 tests/                       offline tests on saved market data (TSLA, 2026-10-19)
 ```
 
