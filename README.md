@@ -108,7 +108,41 @@ before 9:45 are blocked by the config, so 9:47 is the first useful scan.
 
 **To take a trade on paper:** run `/trader-risk` on it (which records the
 PASS), then `/trader-broker`. It needs your explicit yes and a connected
-Alpaca paper account.
+Alpaca paper account (below).
+
+## Alpaca paper account (optional)
+
+The repo's `.mcp.json` adds Alpaca's official MCP server (`alpaca-mcp-server`,
+pinned to 2.4.0), locked to paper trading. It holds no keys: it reads them
+from your environment. On your own computer:
+
+1. In Alpaca's dashboard, create **paper** trading API keys.
+2. Install [`uv`](https://docs.astral.sh/uv/), which provides `uvx`.
+3. Set the keys as environment variables in your shell profile, never in the
+   repo or a chat:
+
+   ```bash
+   export ALPACA_API_KEY="your paper key"       # macOS/Linux: ~/.zshrc or ~/.bashrc
+   export ALPACA_SECRET_KEY="your paper secret"
+   ```
+
+   On Windows: `setx ALPACA_API_KEY "..."` and `setx ALPACA_SECRET_KEY "..."`,
+   then open a new terminal.
+4. Open the repo in Claude Code, approve the `alpaca` server when asked, and
+   check `/mcp` shows it connected.
+5. Ask "show my Alpaca account info" and confirm in the dashboard that it is
+   the paper account.
+
+`.claude/settings.json` sets the permissions for this repo:
+
+- **Ask every time:** placing, changing, cancelling or closing an order.
+- **Blocked:** options, crypto, and "close or cancel everything".
+- **Allowed without asking:** read-only lookups (account, positions, orders,
+  quotes).
+
+Never move an order tool to `allow`. Cloud sessions cannot reach Alpaca, so
+the scheduled scans never place orders. Place them from your own computer
+after your yes.
 
 ## KPIs
 
