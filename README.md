@@ -168,6 +168,8 @@ fills (slippage at the open) will be worse than the replays.
 .claude/skills/trader-*      the 11 Day Trader skills (vendored, MIT, see LICENSE-day-trader-skill)
 .claude/skills/trade-scout/  scout.py (pipeline), features.py (stocks in play), journal.py (KPIs), SKILL.md
 .claude/agents/trade-scout.md
+.claude/settings.json        permissions for the Alpaca order tools (ask / blocked / allowed)
+.mcp.json                    Alpaca's MCP server, paper only, keys from your environment
 config/config.example.json   starting limits for trader/config.json
 journal/trades.jsonl         the paper journal (picks and their settled outcomes)
 tests/                       offline tests on saved market data (TSLA, 2026-10-19)
