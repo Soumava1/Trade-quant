@@ -86,6 +86,10 @@ In Claude Code:
   pipeline and summarises it.
 - The `trade-scout` agent does the same and reads the news behind each HIGH
   trade before reporting.
+- The `trade-research` agent runs `trader-news`, `trader-analyst` and
+  `trader-pelosi` at the same time on the scout's HIGH, PICK and WATCH names
+  and returns CLEAR, CAUTION or DOWNGRADE for each. It can only demote a trade
+  (DOWNGRADE turns HIGH or PICK into WATCH), never promote one.
 
 From the shell:
 
@@ -168,6 +172,7 @@ fills (slippage at the open) will be worse than the replays.
 .claude/skills/trader-*      the 11 Day Trader skills (vendored, MIT, see LICENSE-day-trader-skill)
 .claude/skills/trade-scout/  scout.py (pipeline), features.py (stocks in play), journal.py (KPIs), SKILL.md
 .claude/agents/trade-scout.md
+.claude/agents/trade-research.md  news, earnings (SEC XBRL) and Congress trades in parallel; CLEAR / CAUTION / DOWNGRADE per scout pick
 .claude/settings.json        permissions for the Alpaca order tools (ask / blocked / allowed)
 .mcp.json                    Alpaca's MCP server, paper only, keys from your environment
 config/config.example.json   starting limits for trader/config.json
