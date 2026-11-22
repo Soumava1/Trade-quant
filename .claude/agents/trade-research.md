@@ -32,9 +32,15 @@ under `trader/research/<YYYY-MM-DD-HHMM>/`:
 D=trader/research/$(date +%Y-%m-%d-%H%M); mkdir -p "$D"
 python .claude/skills/trader-news/news.py --tickers T1 T2 --all --hours 72 --dry-run --json > "$D/news.json" 2> "$D/news.err" &
 python .claude/skills/trader-analyst/facts.py T1 T2 --quarters 5 --json > "$D/analyst.json" 2> "$D/analyst.err" &
-python .claude/skills/trader-pelosi/ptr.py new --since $(date -d '-30 days' +%Y-%m-%d) --read --dry-run --tickers T1 T2 > "$D/pelosi.txt" 2> "$D/pelosi.err" &
+python .claude/skills/trader-pelosi/ptr.py new --since $(date -d '-30 days' +%Y-%m-%d) --read --dry-run --state "$D/pelosi-state.json" --tickers T1 T2 > "$D/pelosi.txt" 2> "$D/pelosi.err" &
 wait
 ```
+
+The Congress desk gets its own `--state` path that does not exist yet, so
+`ptr.py new` starts from an empty seen-list and returns every PTR filed in
+the window, including ones `/trader-pelosi` already showed. `--dry-run` keeps
+it from writing that file or touching `trader/state/pelosi.json`. Keep the
+window at 45 days or less: with empty state, `new` looks back 45 days at most.
 
 Allow up to 5 minutes. If one desk fails, read its `.err`, say which and why,
 and carry on with the other two. The SEC needs `SEC_USER_AGENT` set; if a
