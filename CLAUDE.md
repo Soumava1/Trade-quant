@@ -2,9 +2,11 @@
 
 Paper-trading day-trade scout built from Claude Code skills. See README.md.
 
-- Paper only. Never place, approve or schedule an order on the user's behalf. Only
-  `trader-broker` can lead to an order, and only after `trader-risk` passes it and the user
-  types an explicit yes.
+- Paper only. Orders reach Alpaca in two ways only: `trader-broker` after `trader-risk`
+  passes and the user types an explicit yes, or the `trade-desk` agent, which the user has
+  authorised (2026-11-21) to place PAPER orders automatically after its paper guard,
+  research and a `trader-risk` PASS, logging each decision in `trades-log.md`. Nothing
+  else places orders, and nothing ever switches to a live account.
 - `trader/` is runtime state (config, scout runs, journal): gitignored, never commit it. Never
   write the user's email or other personal details into committed files.
 - `.claude/skills/trader-*` is vendored upstream code (MIT). Change it only to fix a real bug,

@@ -114,6 +114,16 @@ before 9:45 are blocked by the config, so 9:47 is the first useful scan.
 PASS), then `/trader-broker`. It needs your explicit yes and a connected
 Alpaca paper account (below).
 
+**Automatic paper desk:** the `trade-desk` agent runs the scout, checks the
+HIGH trades (or the PICK when there is no HIGH) with the research desk, puts
+each through `trader-risk`, and places the ones that pass as bracket orders
+on the Alpaca **paper** account without asking. Before 3:55 PM its
+"flatten" mode closes what it bought that day. It refuses to place anything
+unless `"paper": true`, `ALPACA_PAPER_TRADE` is `"true"` and the account
+number starts with `PA`. Every decision (buy, skip, exit, close, nothing,
+halt) gets one line in `trades-log.md` with time, symbol, action, size,
+price and an honest one-sentence reason. That file stays on your computer.
+
 ## Alpaca paper account (optional)
 
 The repo's `.mcp.json` adds Alpaca's official MCP server (`alpaca-mcp-server`,
@@ -139,14 +149,18 @@ from your environment. On your own computer:
 
 `.claude/settings.json` sets the permissions for this repo:
 
-- **Ask every time:** placing, changing, cancelling or closing an order.
+- **Allowed without asking:** placing a stock order (`place_stock_order`), so
+  the automatic paper desk can run unattended. The `.mcp.json` server is
+  locked to paper and the desk's paper guard checks the account first.
+- **Ask every time:** changing, cancelling or closing an order (the desk's
+  flatten step asks).
 - **Blocked:** options, crypto, and "close or cancel everything".
 - **Allowed without asking:** read-only lookups (account, positions, orders,
   quotes).
 
-Never move an order tool to `allow`. Cloud sessions cannot reach Alpaca, so
-the scheduled scans never place orders. Place them from your own computer
-after your yes.
+Never point `.mcp.json` at a live account while `place_stock_order` is on
+`allow`: move it back to `ask` first. Cloud sessions cannot reach Alpaca, so
+only the scheduled tasks on your own computer place paper orders.
 
 ## KPIs
 
@@ -173,6 +187,7 @@ fills (slippage at the open) will be worse than the replays.
 .claude/skills/trade-scout/  scout.py (pipeline), features.py (stocks in play), journal.py (KPIs), SKILL.md
 .claude/agents/trade-scout.md
 .claude/agents/trade-research.md  news, earnings (SEC XBRL) and Congress trades in parallel; CLEAR / CAUTION / DOWNGRADE per scout pick
+.claude/agents/trade-desk.md      automatic PAPER desk: scout, research, risk, Alpaca bracket orders, flatten, trades-log.md
 .claude/settings.json        permissions for the Alpaca order tools (ask / blocked / allowed)
 .mcp.json                    Alpaca's MCP server, paper only, keys from your environment
 config/config.example.json   starting limits for trader/config.json

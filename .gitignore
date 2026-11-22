@@ -1,5 +1,7 @@
 # Runtime state: config, plans, orders, scout runs and the paper journal
 trader/
+# The trade-desk's local decision log (written on the user's computer, never committed)
+trades-log.md
 
 # Environment and credentials
 .env
