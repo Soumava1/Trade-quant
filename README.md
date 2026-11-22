@@ -149,16 +149,18 @@ from your environment. On your own computer:
 
 `.claude/settings.json` sets the permissions for this repo:
 
-- **Ask every time:** placing, changing, cancelling or closing an order.
+- **Allowed without asking:** placing a stock order (`place_stock_order`), so
+  the automatic paper desk can run unattended. The `.mcp.json` server is
+  locked to paper and the desk's paper guard checks the account first.
+- **Ask every time:** changing, cancelling or closing an order (the desk's
+  flatten step asks).
 - **Blocked:** options, crypto, and "close or cancel everything".
 - **Allowed without asking:** read-only lookups (account, positions, orders,
   quotes).
 
-The order tools stay on `ask` in this file. For the automatic desk, approve
-`place_stock_order`, `cancel_order_by_id` and `close_position` for its
-scheduled task in the desktop app (the approval is kept on that task), rather
-than moving them to `allow` for every session. Cloud sessions cannot reach
-Alpaca, so only the scheduled tasks on your own computer place paper orders.
+Never point `.mcp.json` at a live account while `place_stock_order` is on
+`allow`: move it back to `ask` first. Cloud sessions cannot reach Alpaca, so
+only the scheduled tasks on your own computer place paper orders.
 
 ## KPIs
 
