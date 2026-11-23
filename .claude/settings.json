@@ -23,6 +23,8 @@
       "mcp__alpaca__get_clock",
       "mcp__alpaca__get_stock_snapshot",
       "mcp__alpaca__get_stock_latest_quote",
+      "mcp__alpaca__get_market_movers",
+      "mcp__alpaca__get_most_active_stocks",
       "Bash(python .claude/skills/trade-scout/desk.py:*)",
       "Bash(python .claude/skills/trade-scout/scout.py:*)",
       "Bash(python .claude/skills/trade-scout/journal.py report:*)",

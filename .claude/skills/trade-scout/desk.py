@@ -190,9 +190,12 @@ def age_minutes(as_of: str, now: dt.datetime) -> int | None:
     return round((now - t).total_seconds() / 60)
 
 
-def candidates_report(path: Path, now: dt.datetime | None = None) -> dict[str, Any]:
+def candidates_report(
+    path: Path, now: dt.datetime | None = None, verdicts: dict[str, Any] | None = None
+) -> dict[str, Any]:
     s = json.loads(path.read_text(encoding="utf-8"))
     picks = pick_candidates(s)
+    known = load_verdicts(now) if verdicts is None else verdicts
     rows = []
     for c in picks:
         plan, size = c.get("plan") or {}, c.get("size") or {}
@@ -210,6 +213,7 @@ def candidates_report(path: Path, now: dt.datetime | None = None) -> dict[str, A
                 "missed": None if c["tier"] == "HIGH" else missed_gate(c),
                 "cautions": c.get("cautions") or [],
                 "news": [n.get("title") for n in (c.get("news") or [])[:3]],
+                "verdict_today": known.get(c["symbol"]),  # research from earlier today
             }
         )
     return {
@@ -220,6 +224,100 @@ def candidates_report(path: Path, now: dt.datetime | None = None) -> dict[str, A
         "candidates": rows,
         "none_reason": None if rows else none_reason(s),
     }
+
+
+# --------------------------------------------------------------------------- shortlist
+
+SHORTLIST = Path("trader/shortlist.json")
+# Daily-chart setups that lean the same way as a long opening-range breakout. The oversold
+# setups are mean-reversion and left out.
+MOMENTUM = ("breakout_20d", "bull_flag", "reclaim_ma20")
+
+
+def build_shortlist(
+    daily: dict[str, Any],
+    add: list[str],
+    min_price: float,
+    max_price: float,
+    size: int = 40,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    """The names worth watching at the open: the ones you add (movers, news) first, then
+    the daily scan's momentum setups inside your price range, by setup then dollar volume.
+
+    ponytail: a heuristic. The paper's "in play" test (opening relative volume) can only run
+    after the open; the full-universe scans later in the morning catch what this misses."""
+    now = now or now_ny()
+    rank = {s: i for i, s in enumerate(MOMENTUM)}
+    rows = []
+    for h in daily.get("hits", []):
+        setups = [s for s in h.get("setups", []) if s in rank]
+        price = h.get("price") or 0
+        if setups and min_price <= price <= max_price:
+            best = min(rank[s] for s in setups)
+            rows.append((best, -price * (h.get("volume") or 0), h["symbol"], setups))
+    rows.sort()
+    hits, seen = [], set()
+    for sym in add:
+        sym = sym.upper()
+        if sym not in seen:
+            seen.add(sym)
+            hits.append({"symbol": sym, "why": "added: mover or news"})
+    for _, _, sym, setups in rows:
+        if len(hits) >= size:
+            break
+        if sym not in seen:
+            seen.add(sym)
+            hits.append({"symbol": sym, "why": "daily: " + ", ".join(setups)})
+    return {
+        "mode": "shortlist",
+        "date": now.date().isoformat(),
+        "as_of": now.strftime("%Y-%m-%d %H:%M ET"),
+        "daily_as_of": daily.get("as_of"),
+        "hits": hits[:size],
+    }
+
+
+def shortlist_today(path: Path = SHORTLIST, now: dt.datetime | None = None) -> bool:
+    """True when the shortlist file exists and was built today (New York time)."""
+    if not path.exists():
+        return False
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return False
+    return doc.get("date") == (now or now_ny()).date().isoformat()
+
+
+def read_config(path: Path = Path("trader/config.json")) -> dict[str, Any]:
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads((SKILLS / "trader-budget" / "config.example.json").read_text("utf-8"))
+
+
+# --------------------------------------------------------------------------- verdicts
+
+
+def verdicts_path(now: dt.datetime | None = None) -> Path:
+    return Path("trader/state") / f"verdicts-{(now or now_ny()):%Y-%m-%d}.json"
+
+
+def save_verdict(
+    symbol: str, verdict: str, note: str, now: dt.datetime | None = None, path: Path | None = None
+) -> dict[str, Any]:
+    """Keep today's research verdict per ticker, so the open can act without re-reading."""
+    now = now or now_ny()
+    path = path or verdicts_path(now)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    data[symbol.upper()] = {"verdict": verdict, "note": note.strip(), "at": f"{now:%H:%M}"}
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return data[symbol.upper()]
+
+
+def load_verdicts(now: dt.datetime | None = None, path: Path | None = None) -> dict[str, Any]:
+    path = path or verdicts_path(now)
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 # --------------------------------------------------------------------------- research
@@ -435,6 +533,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--path", type=Path, default=LOCK)
     p = sub.add_parser("candidates", help="the newest scout run's tradable trades, as JSON")
     p.add_argument("--summary", type=Path, help="a summary.json (default: the newest run)")
+    p = sub.add_parser("shortlist", help="before the open: the names to watch at the open")
+    p.add_argument("--add", nargs="*", default=[], type=str.upper, help="movers, news names")
+    p.add_argument("--size", type=int, default=40)
+    p.add_argument("--daily", type=Path, help="a saved `scan.py daily --json` (default: run it)")
+    p.add_argument("--check", action="store_true", help="exit 0 if today's shortlist exists")
+    p = sub.add_parser("verdict", help="keep today's research verdict for a ticker")
+    p.add_argument("symbol", type=str.upper)
+    p.add_argument("verdict", choices=VERDICTS, type=str.upper)
+    p.add_argument("note", nargs="?", default="")
     p = sub.add_parser("research", help="news, earnings and Congress desks in parallel")
     p.add_argument("tickers", nargs="+", type=str.upper)
     p = sub.add_parser("arm", help="every check before an order; prints its JSON when ready")
@@ -458,6 +565,32 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError as exc:
             print(exc, file=sys.stderr)
             return 2
+        return 0
+    if a.cmd == "shortlist":
+        if a.check:
+            ok = shortlist_today()
+            print(f"{SHORTLIST} is {'from today' if ok else 'missing or old'}")
+            return 0 if ok else 1
+        if a.daily:
+            daily = json.loads(a.daily.read_text(encoding="utf-8-sig"))  # PowerShell adds a BOM
+        else:
+            r = py("trader-scanner/scan.py", "daily", "--json", "--no-write", timeout=900)
+            try:
+                daily = json.loads(r.stdout)
+            except ValueError:
+                print(f"daily scan failed: {(r.stderr or r.stdout).strip()[:300]}", file=sys.stderr)
+                daily = {"hits": []}  # the added names still make a shortlist
+        scout_cfg = read_config().get("scout", {})
+        doc = build_shortlist(
+            daily, a.add, scout_cfg.get("min_price", 5), scout_cfg.get("max_price", 150), a.size
+        )
+        SHORTLIST.parent.mkdir(parents=True, exist_ok=True)
+        SHORTLIST.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        print(f"Wrote {SHORTLIST}: {len(doc['hits'])} names (daily scan of {daily.get('as_of')}).")
+        print(" ".join(h["symbol"] for h in doc["hits"]))
+        return 0 if doc["hits"] else 1
+    if a.cmd == "verdict":
+        print(json.dumps({a.symbol: save_verdict(a.symbol, a.verdict, a.note)}))
         return 0
     if a.cmd == "research":
         print(json.dumps(research(a.tickers), indent=2))

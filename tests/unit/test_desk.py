@@ -195,6 +195,40 @@ def test_record_failed_order_logs_skip_with_the_reason(tmp_path):
     )
 
 
+def test_shortlist_puts_added_names_first_then_momentum_setups_in_range(tmp_path):
+    daily = {
+        "as_of": "2026-11-23",
+        "hits": [
+            {"symbol": "NVDA", "setups": ["oversold_bounce"], "price": 165, "volume": 9e8},
+            {"symbol": "AAPL", "setups": ["reclaim_ma20"], "price": 349, "volume": 5e7},  # $150+
+            {"symbol": "RCL", "setups": ["reclaim_ma20"], "price": 90, "volume": 1e7},
+            {"symbol": "BIG", "setups": ["breakout_20d"], "price": 50, "volume": 4e7},
+            {"symbol": "SML", "setups": ["breakout_20d"], "price": 20, "volume": 2e6},
+            {"symbol": "FLG", "setups": ["bull_flag", "oversold"], "price": 30, "volume": 1e6},
+        ],
+    }
+    doc = desk.build_shortlist(daily, ["pdd", "BIG"], 5, 150, size=5, now=T)
+    assert [h["symbol"] for h in doc["hits"]] == ["PDD", "BIG", "SML", "FLG", "RCL"]
+    assert doc["hits"][2]["why"] == "daily: breakout_20d" and doc["date"] == "2026-11-23"
+
+    path = tmp_path / "shortlist.json"
+    path.write_text(json.dumps(doc))
+    assert desk.shortlist_today(path, now=T)
+    assert not desk.shortlist_today(path, now=T + dt.timedelta(days=1))
+
+
+def test_verdicts_are_kept_per_day_and_shown_with_candidates(tmp_path):
+    vp = tmp_path / "verdicts.json"
+    desk.save_verdict("h1", "CAUTION", "earnings Thursday", now=T, path=vp)
+    desk.save_verdict("H1", "CLEAR", "nothing new", now=T, path=vp)
+    assert desk.load_verdicts(path=vp) == {
+        "H1": {"verdict": "CLEAR", "note": "nothing new", "at": "10:24"}
+    }
+    p = write_summary(tmp_path, [cand("H1", "HIGH", 70), cand("H2", "HIGH", 60)])
+    rows = desk.candidates_report(p, now=T, verdicts=desk.load_verdicts(path=vp))["candidates"]
+    assert rows[0]["verdict_today"]["verdict"] == "CLEAR" and rows[1]["verdict_today"] is None
+
+
 def test_cli_lock_exit_codes(tmp_path):
     lock = tmp_path / "desk.lock"
     assert desk.main(["lock", "--owner", "a", "--path", str(lock)]) == 0
