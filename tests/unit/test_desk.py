@@ -148,7 +148,9 @@ def test_arm_ready_writes_order_and_attempt_then_record_logs_buy(tmp_path):
     (code, order), f, run = arm(tmp_path, "H1", 100.2)
     assert code == desk.READY and order["stop_loss_stop_price"] == "99.0"
     assert [c[0] for c in run.calls] == ["trader-risk/check.py", "trader-broker/ticket.py"]
-    assert json.loads(f["orders"].read_text())["orders"][0]["symbol"] == "H1"
+    written = json.loads(f["orders"].read_text())["orders"][0]
+    assert written["symbol"] == "H1"
+    assert written["plan"] == {"entry": 100.0, "stop": 99.0, "target": 102.0}  # risk needs it
     log = f["log"].read_text(encoding="utf-8")
     assert "| H1 | ATTEMPT | 3 sh | ~$100.00 | Bracket: stop $99.00, target $102.00;" in log
     assert "Passed every gate (score 70, 2R target); research CLEAR" in log
@@ -227,6 +229,30 @@ def test_verdicts_are_kept_per_day_and_shown_with_candidates(tmp_path):
     p = write_summary(tmp_path, [cand("H1", "HIGH", 70), cand("H2", "HIGH", 60)])
     rows = desk.candidates_report(p, now=T, verdicts=desk.load_verdicts(path=vp))["candidates"]
     assert rows[0]["verdict_today"]["verdict"] == "CLEAR" and rows[1]["verdict_today"] is None
+
+
+def test_arm_and_record_with_the_real_risk_check_and_ticket(tmp_path, monkeypatch):
+    """No fakes: trader-risk and trader-broker run offline on a market and a buy-stop entry."""
+    repo = Path(__file__).resolve().parents[2]
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "trader").mkdir()
+    (tmp_path / "trader" / "config.json").write_text(
+        (repo / "config" / "config.example.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    stop_entry = cand("PDD", "HIGH", 60, entry=86.03, stop=84.80, target=88.50)
+    stop_entry["order"] |= {"type": "stop", "stop_price": "86.03", "qty": "2"}
+    stop_entry["pending"] = {"price": 86.03}
+    summary = write_summary(tmp_path, [cand("MOD", "HIGH", 70, 141.35, 140.01, 145.37), stop_entry])
+
+    code, order = desk.arm("MOD", 141.40, "CLEAR", summary_path=summary, now=T)
+    assert code == desk.READY, (tmp_path / "trades-log.md").read_text(encoding="utf-8")
+    assert order["type"] == "market" and "plan" not in order  # nothing of ours goes to Alpaca
+    desk.record("MOD", "placed", "id-1", "3", "141.38", now=T)
+
+    code, order = desk.arm("PDD", 85.70, "CLEAR", summary_path=summary, now=T)
+    assert code == desk.READY and order["type"] == "stop" and order["stop_price"] == "86.03"
+    line = desk.record("PDD", "placed", "id-2", now=T)
+    assert "Buy-stop resting at the range high" in line and "not broken out yet" in line
 
 
 def test_cli_lock_exit_codes(tmp_path):

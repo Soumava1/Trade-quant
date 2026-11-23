@@ -214,6 +214,7 @@ def candidates_report(
                 "cautions": c.get("cautions") or [],
                 "news": [n.get("title") for n in (c.get("news") or [])[:3]],
                 "verdict_today": known.get(c["symbol"]),  # research from earlier today
+                "entry_type": (c.get("order") or {}).get("type"),  # "stop": not broken out yet
             }
         )
     return {
@@ -384,6 +385,8 @@ def describe(c: dict[str, Any], verdict: str, note: str = "") -> str:
         )
     else:
         base = f"WATCH, lower conviction: missed {missed_gate(c)} (score {score:.0f})"
+    if c.get("pending"):
+        base += "; buy-stop at the range high, not broken out yet"
     text = f"{base}; research {verdict}"
     return f"{text} ({note.strip().rstrip('.')})" if note.strip() else text
 
@@ -414,6 +417,7 @@ def arm(
     """Every check before the order. Returns (READY, place_stock_order args) or a skip code.
 
     Every outcome but READY writes its SKIP line; READY writes the ATTEMPT line."""
+    clock = ["--now", f"{now:%Y-%m-%d %H:%M}"] if now else []  # a pinned clock reaches the tools
     now = now or now_ny()
     sym = symbol.upper()
     s = json.loads((summary_path or newest_summary()).read_text(encoding="utf-8"))
@@ -443,9 +447,13 @@ def arm(
     if ask <= stop:
         return skip(f"Stale: ask ${ask:.2f} is at or under the stop ${stop:.2f}")
 
+    # The scout's summary drops the order's plan; trader-risk needs it for the entry price
+    # (without it every market order is blocked for "no price") and trader-broker for the
+    # max loss. tool_input() strips "plan" again before anything goes to Alpaca.
+    full = {**c["order"], "plan": {"entry": entry, "stop": stop, "target": plan.get("target")}}
     orders.parent.mkdir(parents=True, exist_ok=True)
-    orders.write_text(json.dumps({"orders": [c["order"]]}, indent=2) + "\n", encoding="utf-8")
-    r = run("trader-risk/check.py", "--json")
+    orders.write_text(json.dumps({"orders": [full]}, indent=2) + "\n", encoding="utf-8")
+    r = run("trader-risk/check.py", "--json", *clock)
     try:
         result = json.loads(r.stdout)["results"][0]
     except (ValueError, KeyError, IndexError):
@@ -454,15 +462,19 @@ def arm(
         reasons = "; ".join(result.get("reasons") or ["no reason given"])
         stop_run = any(w in reasons.lower() for w in STOP_RUN_WORDS)
         return skip(f"Risk BLOCK: {reasons}", STOP_RUN if stop_run else SKIPPED)
-    a = run("trader-broker/ticket.py", "approve", "--index", "1", "--reply", REPLY)
+    a = run("trader-broker/ticket.py", "approve", "--index", "1", "--reply", REPLY, *clock)
     if "Recorded" not in a.stdout:
         return skip(f"Approval not recorded: {(a.stdout or a.stderr).strip()[:200]}")
     order, _ = json.JSONDecoder().raw_decode(a.stdout[a.stdout.index("{") :])
     reason = describe(c, verdict, note)
     qty = (c.get("size") or {}).get("qty") or order.get("qty")
     pending.parent.mkdir(parents=True, exist_ok=True)
+    stop_entry = order.get("type") == "stop"
     pending.write_text(
-        json.dumps({"symbol": sym, "qty": qty, "entry": entry, "reason": reason}), encoding="utf-8"
+        json.dumps(
+            {"symbol": sym, "qty": qty, "entry": entry, "reason": reason, "stop_entry": stop_entry}
+        ),
+        encoding="utf-8",
     )
     log_line(
         "ATTEMPT",
@@ -507,7 +519,12 @@ def record(
         print(f"ticket.py result: {(r.stderr or r.stdout).strip()}", file=sys.stderr)
     if status == "placed":
         fill = str(price) if price else f"~{p['entry']}"
-        tail = "" if price else " Fill not reported yet."
+        if price:
+            tail = ""
+        elif p.get("stop_entry"):
+            tail = " Buy-stop resting at the range high: fills only on the breakout."
+        else:
+            tail = " Fill not reported yet."
         line = log_line("BUY", sym, str(qty or p["qty"]), fill, p["reason"] + "." + tail, log, now)
     else:
         why = f"Order {status}: {note or 'no detail came back'}; {p['reason']}"

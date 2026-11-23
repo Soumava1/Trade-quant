@@ -189,6 +189,9 @@ class Candidate:
     metrics: dict[str, float] = field(default_factory=dict)
     position_cap_pct: float | None = None
     late: dict[str, Any] | None = None
+    # --pending: not broken out yet; planned as a buy-stop one cent over the range high
+    # (carried in `late`, so the plan, replays and size start from that price)
+    pending: bool = False
     targets_tried: list[dict[str, Any]] = field(default_factory=list)
     features: dict[str, Any] | None = None
     regime: dict[str, Any] | None = None
@@ -341,6 +344,8 @@ class Options:
     or_minutes: int = 15
     daily_pick: bool = True
     regime: dict[str, Any] | None = None
+    pending: bool = False
+    max_pending_pct: float = 3.0
 
 
 def offline_path(opts: Options, *parts: str) -> Path | None:
@@ -386,6 +391,22 @@ def pick_candidates(
         hits = [h for h in hits if float(h.get("price") or 0) <= max_price]
     hits.sort(key=lambda h: (-int(h.get("bar_index", 0)), float(h.get("pct_over", 0))))
     return [Candidate(symbol=h["symbol"], scan=h) for h in hits[:n]]
+
+
+def watch_symbols(opts: Options) -> list[str]:
+    """The tickers in --symbols or --watchlist (a watchlist.json's hits, or one per line)."""
+    if opts.symbols:
+        return [s.strip().upper() for s in opts.symbols.split(",") if s.strip()]
+    if not opts.watchlist or not opts.watchlist.exists():
+        return []
+    text = opts.watchlist.read_text(encoding="utf-8-sig")
+    if text.lstrip().startswith(("{", "[")):
+        doc = json.loads(text)
+        items = doc.get("hits", []) if isinstance(doc, dict) else doc
+        return [str(x.get("symbol") if isinstance(x, dict) else x).upper() for x in items if x]
+    return [
+        ln.split("|")[0].strip().upper() for ln in text.splitlines() if ln.strip()[:1].isalpha()
+    ]
 
 
 def _ny_to_utc_iso(local: dt.datetime) -> str:
@@ -450,6 +471,8 @@ def step_entry(opts: Options, c: Candidate) -> bool:
         c.stop_here(f"entry: {res.text or 'no data'}")
         return False
     c.entry = res.data
+    if res.data.get("status") == "waiting" and opts.pending:
+        return pending_entry(opts, c, res.data)
     if res.data.get("status") != "triggered":
         c.stop_here(f"entry {res.data.get('status')}: {res.data.get('reason', '')}")
         return False
@@ -487,12 +510,44 @@ def step_entry(opts: Options, c: Candidate) -> bool:
     return True
 
 
+def pending_entry(opts: Options, c: Candidate, data: dict[str, Any]) -> bool:
+    """Not broken out yet: plan a buy-stop one cent over the range high, if the last close
+    is within max_pending_pct of it. The replays then start from that price, as if the
+    breakout had just happened.
+
+    ponytail: assumes the odds after a later trigger match the odds now; the Time Machine
+    still stops every replay at the flat-by time, and unfilled entries are cancelled late
+    morning so a 2 PM trigger never uses a 9:45 plan."""
+    level, last = data.get("level"), data.get("last") or {}
+    gap = last.get("vs_level_pct")
+    if level is None or gap is None or not last.get("bar_start"):
+        c.stop_here(f"pending: no range high or closed bar yet ({data.get('reason', '')})")
+        return False
+    if gap < -opts.max_pending_pct:
+        c.stop_here(
+            f"pending: last close {gap:+.2f}% from the range high "
+            f"(buy-stops only within {opts.max_pending_pct:g}%)"
+        )
+        return False
+    bar, close_label = _bar_close(str(last["bar_start"]))
+    c.late = {
+        "price": round(float(level) + 0.01, 2),
+        "bar": bar,
+        "time": close_label,
+        "first_trigger": None,
+        "age_min": 0,
+        "over_pct": gap,
+    }
+    c.pending = True
+    return True
+
+
 def entry_rank(c: Candidate) -> tuple[float, int, float]:
-    """Highest relative volume first (the stocks-in-play ranking), fresh before late."""
+    """Highest relative volume first (the stocks-in-play ranking): fresh, late, pending."""
     rvol = float((c.features or {}).get("rvol") or 0.0)
     if c.late is None:
         return (-rvol, 0, float((c.entry or {}).get("minutes_since") or 0))
-    return (-rvol, 1, float(c.late["over_pct"]))
+    return (-rvol, 2 if c.pending else 1, abs(float(c.late["over_pct"])))
 
 
 def entry_point(c: Candidate) -> tuple[float, int]:
@@ -671,6 +726,9 @@ def step_candidate(opts: Options, c: Candidate) -> None:
         c.tier = REJECT
         return
     c.order = data["orders"][0]
+    if c.pending:  # a buy-stop at the planned entry: it only fills on the breakout
+        c.order["type"] = "stop"
+        c.order["stop_price"] = f"{float(c.late['price']):.2f}"
     c.status = "scored"
 
 
@@ -706,6 +764,10 @@ def run(opts: Options) -> dict[str, Any]:
         return {"ok": False, "error": "scan: " + err, "candidates": [], "notes": notes}
     opts.regime = step_regime(opts)
     pool = pick_candidates(scan, opts.entry_pool, opts.max_price)
+    if opts.pending:  # the names that have not broken out yet get an entry check too
+        have = {c.symbol for c in pool}
+        extra = [s for s in watch_symbols(opts) if s not in have]
+        pool += [Candidate(symbol=s, scan={}) for s in extra[: max(0, opts.entry_pool - len(pool))]]
     for c in pool:
         if step_entry(opts, c):
             step_features(opts, c)
@@ -835,7 +897,8 @@ def candidate_json(c: Candidate) -> dict[str, Any]:
             {k: n.get(k) for k in ("title", "link", "time", "tags", "source")} for n in c.news[:5]
         ],
         "move_pct": (c.move or {}).get("pct"),
-        "late_entry": c.late,
+        "late_entry": None if c.pending else c.late,
+        "pending": c.late if c.pending else None,
         "targets_tried": c.targets_tried,
         "features": c.features,
         "position_cap_pct": c.position_cap_pct,
@@ -1018,6 +1081,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-rvol", type=float, help="stocks in play: opening-range RVOL (1.0)")
     ap.add_argument("--no-pick", action="store_true", help="no lower-conviction paper PICK")
     ap.add_argument("--no-journal", action="store_true", help="do not record picks")
+    ap.add_argument(
+        "--pending",
+        action="store_true",
+        help="also plan names that have not broken out yet, as buy-stops at the range high "
+        "(needs --symbols or --watchlist)",
+    )
+    ap.add_argument(
+        "--max-pending-pct", type=float, default=3.0, help="--pending: within this %% (3)"
+    )
     ap.add_argument("--json", action="store_true", help="print the summary as JSON")
     return ap
 
@@ -1079,7 +1151,12 @@ def main(argv: list[str] | None = None) -> int:
         or_minutes=a.or_minutes or int(sc.get("or_minutes", 15)),
         daily_pick=not a.no_pick and bool(sc.get("daily_pick", True)),
         caps=parse_caps(caps) if caps else DEFAULT_CAPS,
+        pending=a.pending,
+        max_pending_pct=a.max_pending_pct,
     )
+    if a.pending and not (a.symbols or a.watchlist):
+        print("trade-scout: --pending needs --symbols or --watchlist", file=sys.stderr)
+        return 2
     if not (trader_dir / "config.json").exists():
         print(
             f"trade-scout: no {trader_dir / 'config.json'}, using the example config "

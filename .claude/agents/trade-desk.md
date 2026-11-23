@@ -78,8 +78,13 @@ lower conviction; your research note must say plainly when the story is thin.
    `trader/universe.txt` is over 7 days old, `python .claude/skills/trader-scanner/scan.py universe`.
 2. Scout, on the shortlist unless the run asks for "full": if
    `D shortlist --check` exits 0, run
-   `python .claude/skills/trade-scout/scout.py --no-journal --watchlist trader/shortlist.json`
-   (under a minute); otherwise, or for "full",
+   `python .claude/skills/trade-scout/scout.py --no-journal --watchlist trader/shortlist.json --pending`
+   (one to two minutes). `--pending` also plans the names that have NOT broken
+   out yet, within 3 % of their range high, as **buy-stops** one cent over the
+   range high (`entry_type` "stop" in `D candidates`): placed now, they fill
+   only if the breakout happens, so the entry is never chased. Drop
+   `--pending` from 11:00 on (late-day triggers should not use a morning
+   plan). Otherwise, or for "full",
    `python .claude/skills/trade-scout/scout.py --no-journal` (the whole
    universe, 5 to 10 minutes). The cloud owns the journal. Exit 2 means it
    could not run (closed market, range still forming):
@@ -111,10 +116,24 @@ lower conviction; your research note must say plainly when the story is thin.
       denied or returned no order id. Never retry a failed order this run.
 6. Unlock, and report what was placed and skipped, with the log lines.
 
+## Mode "expire" (about 11:00)
+
+Buy-stops planned in the morning should not fill in the afternoon.
+
+1. Lock and paper guard. `get_orders` (status open, nested).
+2. For each symbol the log shows as `BUY` today whose entry order is still
+   open and unfilled (a buy `stop` order, not the bracket's sell legs):
+   `cancel_order_by_id` the entry (its legs go with it), then
+   `D log SKIP SYM - - "Buy-stop expired unfilled at 11:00: the breakout never came."`
+3. Leave filled positions and everything the desk did not place. Unlock.
+
 ## Mode "flatten" (about 3:40 PM; flat by 15:55 is a hard rule)
 
-1. Lock and paper guard as above. Then `get_all_positions`.
-2. For each symbol the log shows as `BUY` today:
+1. Lock and paper guard as above. Then `get_all_positions` and `get_orders`
+   (status open, nested).
+2. Any desk buy-stop from today still unfilled: cancel it as in "expire" and
+   log the `SKIP`.
+3. For each symbol the log shows as `BUY` today:
    - **Still open**: `get_orders` (status open, nested) and
      `cancel_order_by_id` each of its open bracket legs, then
      `close_position` for that symbol only. Record the sell:
@@ -123,9 +142,9 @@ lower conviction; your research note must say plainly when the story is thin.
    - **Already closed** (stop or target filled): find the filled leg in
      `get_orders` (status closed), record it with `ticket.py fill`, and
      `D log EXIT S Q P "stop hit, -1R"` (or "target hit, +2R").
-3. A position NOT bought by the desk today is not yours: leave it, log
+4. A position NOT bought by the desk today is not yours: leave it, log
    nothing, mention it in the report.
-4. Never call `close_all_positions` or `cancel_all_orders`. Unlock.
+5. Never call `close_all_positions` or `cancel_all_orders`. Unlock.
 
 ## Never
 
