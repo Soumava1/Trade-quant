@@ -115,14 +115,18 @@ PASS), then `/trader-broker`. It needs your explicit yes and a connected
 Alpaca paper account (below).
 
 **Automatic paper desk:** the `trade-desk` agent runs the scout, checks the
-HIGH trades (or the PICK when there is no HIGH) with the research desk, puts
-each through `trader-risk`, and places the ones that pass as bracket orders
+HIGH trades (or the PICK when there is no HIGH), plus any sized WATCH setups,
+with the research desk, puts each through `trader-risk`, and places the ones that pass as bracket orders
 on the Alpaca **paper** account without asking. Before 3:55 PM its
 "flatten" mode closes what it bought that day. It refuses to place anything
 unless `"paper": true`, `ALPACA_PAPER_TRADE` is `"true"` and the account
 number starts with `PA`. Every decision (buy, skip, exit, close, nothing,
 halt) gets one line in `trades-log.md` with time, symbol, action, size,
 price and an honest one-sentence reason. That file stays on your computer.
+
+WATCH is a deliberately loosened gate: those setups have positive odds but
+missed one scout gate. The desk trades one only when research says CLEAR (a
+CAUTION skips it), and its log line names the gate it missed.
 
 ## Alpaca paper account (optional)
 
