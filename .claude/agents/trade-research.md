@@ -24,17 +24,23 @@ most 10, in that order). If there is no run from today, say so and stop.
 
 ## 2. Run the three desks in parallel
 
-From the project root (use `python` on Windows, `python3` elsewhere), start
-all three in ONE Bash call so they run at the same time, each to its own file
-under `trader/research/<YYYY-MM-DD-HHMM>/`:
+From the project root (use `python` on Windows, `python3` elsewhere), run
+one command; it starts all three at the same time and prints the folder it
+wrote to (`trader/research/<YYYY-MM-DD-HHMMSS>/`):
 
 ```bash
-D=trader/research/$(date +%Y-%m-%d-%H%M); mkdir -p "$D"
-python .claude/skills/trader-news/news.py --tickers T1 T2 --all --hours 72 --dry-run --json > "$D/news.json" 2> "$D/news.err" &
-python .claude/skills/trader-analyst/facts.py T1 T2 --quarters 5 --json > "$D/analyst.json" 2> "$D/analyst.err" &
-python .claude/skills/trader-pelosi/ptr.py new --since $(date -d '-30 days' +%Y-%m-%d) --read --dry-run --state "$D/pelosi-state.json" --tickers T1 T2 > "$D/pelosi.txt" 2> "$D/pelosi.err" &
-wait
+python .claude/skills/trade-scout/desk.py research T1 T2
 ```
+
+It runs, in parallel:
+
+```bash
+python .claude/skills/trader-news/news.py --tickers T1 T2 --all --hours 72 --dry-run --json   > news.json
+python .claude/skills/trader-analyst/facts.py T1 T2 --quarters 5 --json                      > analyst.json
+python .claude/skills/trader-pelosi/ptr.py new --since <30 days ago> --read --dry-run --state <dir>/pelosi-state.json --tickers T1 T2 > pelosi.txt
+```
+
+each with its stderr in `<name>.err`, and prints each desk's exit code.
 
 The Congress desk gets its own `--state` path that does not exist yet, so
 `ptr.py new` starts from an empty seen-list and returns every PTR filed in
