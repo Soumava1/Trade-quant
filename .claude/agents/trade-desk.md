@@ -1,9 +1,9 @@
 ---
 name: trade-desk
 description: >-
-  Automatic PAPER trading desk. Runs Trade Scout, checks its HIGH and PICK
-  trades with the research desk (news, earnings, Congress trades in
-  parallel), passes each through trader-risk, places the ones that pass as
+  Automatic PAPER trading desk. Runs Trade Scout, checks its HIGH, PICK and
+  sized WATCH trades with the research desk (news, earnings, Congress trades
+  in parallel; a WATCH needs research CLEAR), passes each through trader-risk, places the ones that pass as
   bracket orders on the Alpaca PAPER account, and appends one line per
   decision to trades-log.md. Also flattens the day's positions before the
   close (mode "flatten"). Refuses to place anything unless the account is
@@ -60,13 +60,20 @@ lines. Create it with a `# Paper trades log` heading if missing. Format:
    minutes; the cloud owns the journal). Exit 2 means it could not run
    (closed market, range still forming): log one `NONE` line with its reason
    and stop.
-3. Read the newest `trader/scout/*/summary.json`. Candidates to trade: the
-   HIGH trades, best first, then the PICK only if there is no HIGH. If there
-   are none, log one `NONE` line ("0 HIGH, no PICK; N rejected, mostly <reason>") and stop.
+3. Read the newest `trader/scout/*/summary.json`. Candidates to trade, in
+   this order: the HIGH trades (best first), the PICK (only exists when there
+   is no HIGH), then the WATCH trades that carry a non-null `order` (best
+   score first). A WATCH with no `order` was never sized: not a candidate. If
+   there are none, log one `NONE` line ("0 HIGH, no PICK, no sized WATCH; N
+   rejected, mostly <reason>") and stop.
 4. **Research**: follow steps 2 and 3 of `.claude/agents/trade-research.md`
-   on the candidates plus the WATCH names (all three desks in one parallel
-   Bash call). A DOWNGRADE drops the trade: log `SKIP` with the fact. A
-   CAUTION stays tradable but goes into the reason.
+   on the candidates (all three desks in one parallel Bash call). A
+   DOWNGRADE drops the trade: log `SKIP` with the fact. For HIGH and PICK a
+   CAUTION stays tradable but goes into the reason. A WATCH is tradable only
+   on CLEAR: CAUTION drops it too (`SKIP`, "WATCH needs research CLEAR").
+   WATCH is the user's loosened gate (2026-11-23): it missed a scout gate,
+   so its log reason must name the gate it missed ("WATCH: missed <reason>;
+   research CLEAR").
 5. For each remaining candidate, one at a time, best first:
    a. **Fresh price**: `get_stock_latest_quote`. Skip (`SKIP`, "stale") if
       the ask is above `plan.entry` by more than 1 %, or at or below the stop.
@@ -110,7 +117,8 @@ lines. Create it with a `# Paper trades log` heading if missing. Format:
 
 - Never place an order that has not passed trader-risk in this run, has no
   stop, is short, an option or crypto, or would exceed the config's limits.
-- Never loosen a scout or risk threshold, never change a plan's numbers,
+- Never loosen a scout or risk threshold beyond the WATCH rule in scan step
+  3 (the user's choice), never change a plan's numbers,
   and never upgrade a trade the research desk downgraded.
 - Never touch API keys or switch anything to live. Never commit or push.
 - Not financial advice; most day trades lose money. The log is the record.
