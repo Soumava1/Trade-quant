@@ -126,6 +126,9 @@ def session_trade(
             break
         if half1 is None and b[2] >= t1:
             half1, cur_stop = 1.0, fill  # T1: half off, the rest to breakeven
+            if b[3] <= cur_stop:  # the same bar also traded back to the entry: read it so
+                half2 = 0.0
+                break
         if half1 is not None and b[2] >= t2:
             half2 = k
             break
@@ -278,10 +281,12 @@ def main(argv: list[str] | None = None) -> int:
     for sym in symbols:
         f = cache / f"{sym}.json"
         if f.exists() and not a.refresh and not a.offline_dir:
-            results.append(json.loads(f.read_text(encoding="utf-8")))
-            continue
+            cached = json.loads(f.read_text(encoding="utf-8"))
+            if cached.get("rule") == rule:  # same day AND same rule, or it is run again
+                results.append(cached)
+                continue
         try:
-            res = backtest_symbol(get_chart(sym, a.offline_dir), sym, **rule)
+            res = backtest_symbol(get_chart(sym, a.offline_dir), sym, **rule) | {"rule": rule}
         except (OSError, RuntimeError, ValueError) as e:
             results.append({"symbol": sym, "error": str(e)[:160]})
             continue

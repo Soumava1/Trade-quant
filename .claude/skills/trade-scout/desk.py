@@ -542,6 +542,32 @@ def save_trade(
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def record_fill(
+    symbol: str,
+    qty: str,
+    price: str,
+    order_id: str,
+    now: dt.datetime | None = None,
+    trades: Path | None = None,
+    run=py,
+) -> str:
+    """One exit (T1, T2, stop or close) into trader-broker's fill log, once per Alpaca order
+    id: the portfolio and the monthly-stop P&L read that log, the Markdown log does not."""
+    sym = symbol.upper()
+    t = load_trades(now, trades).get(sym)
+    if not t:
+        raise ValueError(f"no desk trade in {sym} today")
+    done = list(t.get("fills") or [])
+    if order_id in done:
+        return f"{sym}: the fill of order {order_id} is already recorded"
+    args = ["fill", "--symbol", sym, "--side", "sell", "--qty", str(qty), "--price", str(price)]
+    r = run("trader-broker/ticket.py", *args)
+    if r.returncode:
+        raise ValueError(f"ticket.py fill: {(r.stderr or r.stdout).strip()[:200]}")
+    save_trade({"symbol": sym, "fills": [*done, order_id]}, now, trades)
+    return f"{sym}: recorded the sale of {qty} at {price} (order {order_id})"
+
+
 def record(
     symbol: str,
     status: str,
@@ -642,6 +668,11 @@ def main(argv: list[str] | None = None) -> int:
         "--merge", action="store_true", help="keep today's shortlist, put the --add names on top"
     )
     p = sub.add_parser("trades", help="today's desk trades (entry, stop, T1, T2, order ids)")
+    p = sub.add_parser("fill", help="record an exit fill in the broker log, once per order id")
+    p.add_argument("symbol", type=str.upper)
+    p.add_argument("--qty", required=True)
+    p.add_argument("--price", required=True)
+    p.add_argument("--order-id", required=True, help="the Alpaca id of the leg that filled")
     p = sub.add_parser("breakeven", help="mark a trade's stop as moved to breakeven")
     p.add_argument("symbol", type=str.upper)
     p = sub.add_parser("verdict", help="keep today's research verdict for a ticker")
@@ -712,6 +743,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if doc["hits"] else 1
     if a.cmd == "trades":
         print(json.dumps(load_trades(), indent=2))
+        return 0
+    if a.cmd == "fill":
+        try:
+            print(record_fill(a.symbol, a.qty, a.price, a.order_id))
+        except ValueError as exc:
+            print(f"Not recorded: {exc}", file=sys.stderr)
+            return 2
         return 0
     if a.cmd == "breakeven":
         t = load_trades().get(a.symbol)
