@@ -190,11 +190,14 @@ Buy-stops planned in the morning should not fill in the afternoon.
 ## Mode "flatten" (about 3:40 PM; flat by 15:55 is a hard rule)
 
 1. Lock and paper guard as above. Then `get_all_positions` and `get_orders`
-   (status open, nested).
+   (status **all**, nested): the open orders to cancel, and the filled legs
+   (ids, quantities, prices) step 3 records, including any that filled since
+   the last manage run.
 2. Any desk buy-stop from today still unfilled: cancel it as in "expire" and
    log the `SKIP`.
-3. Run "manage" step 2 first, so every leg that already filled today (T1,
-   T2, stops) is in the broker's fill log once.
+3. Run "manage" step 2 on the filled legs from step 1's status-all list, so
+   every leg that already filled today (T1, T2, stops) is in the broker's
+   fill log once.
 4. For each symbol the log shows as `BUY` today:
    - **Still open**: `get_orders` (status open, nested) and
      `cancel_order_by_id` each of its open bracket legs, then
