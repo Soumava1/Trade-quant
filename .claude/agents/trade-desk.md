@@ -99,6 +99,9 @@ lower conviction; your research note must say plainly when the story is thin.
 1. `git pull --ff-only` (report and continue if it fails). If
    `trader/config.json` is missing, copy `config/config.example.json`. If
    `trader/universe.txt` is over 7 days old, `python .claude/skills/trader-scanner/scan.py universe`.
+   **Manage** (below) the trades already open first, before anything that
+   can end the run early: protecting an open trade never waits on finding a
+   new one.
 2. Scout, on the shortlist unless the run asks for "full": if
    `D shortlist --check` exits 0, run
    `python .claude/skills/trade-scout/scout.py --no-journal --watchlist trader/shortlist.json --pending`
@@ -142,10 +145,10 @@ lower conviction; your research note must say plainly when the story is thin.
       `--status failed --note "<what came back>"` and do not send the second.
       If only the second failed, record the first id alone (the log says
       one bracket is missing). Never retry a failed order this run.
-6. **Manage** (below) the trades already open, then unlock and report what
-   was placed and skipped, with the log lines.
+6. Unlock, and report what was managed, placed and skipped, with the log
+   lines.
 
-## Mode "manage" (in every scan, and on its own in the afternoon)
+## Mode "manage" (first in every scan, and on its own in the afternoon)
 
 T1 rule: once the T1 bracket's take-profit has filled, the T2 half's stop
 goes up to the entry, so the rest of the trade can no longer lose.
@@ -153,16 +156,23 @@ goes up to the entry, so the rest of the trade can no longer lose.
 1. Lock (skip when called from inside a scan, which holds it) and paper
    guard. `D trades` lists today's desk trades with `entry`, `t1`, `t2` and
    `order_ids` (T1 bracket first). `get_orders` (status all, nested).
-2. For each trade with two order ids and `breakeven` false:
+2. Every exit leg that has filled (a take-profit or a stop-loss, on either
+   bracket) goes into the broker's fill log exactly once:
+   `D fill SYM --qty Q --price P --order-id <that leg's id>`. It skips an id
+   already recorded, so it is safe on every run; this is what keeps
+   `trader/portfolio.json` and the monthly-stop P&L right. The Markdown log
+   line is extra, never a substitute.
+3. For each trade with two order ids and `breakeven` false:
    - T1 bracket's take-profit **filled**, T2 bracket still open: take the T2
      bracket's stop-loss leg and `replace_order_by_id` it with
      `stop_price` = the trade's `entry` (never lower than its current stop,
      never higher than the entry). Then `D breakeven SYM` and
      `D log EXIT SYM <T1 qty> <T1 fill> "T1 hit: +1R on half; the rest's stop moved to breakeven $<entry>."`
    - Both brackets stopped out: `D log EXIT SYM <qty> <stop fill> "Stop hit on both halves: -1R."`
-     and `ticket.py fill` the sells.
    - T2 filled: `D log EXIT SYM <T2 qty> <T2 fill> "T2 hit: +<k>R on the second half."`
-3. Change nothing else: never move a stop down, never touch a take-profit,
+   Log each EXIT once: skip one whose leg was already recorded by `D fill`
+   on an earlier run.
+4. Change nothing else: never move a stop down, never touch a take-profit,
    never touch an order the desk did not place. Unlock if you locked.
 
 ## Mode "expire" (about 11:00)
@@ -180,21 +190,26 @@ Buy-stops planned in the morning should not fill in the afternoon.
 ## Mode "flatten" (about 3:40 PM; flat by 15:55 is a hard rule)
 
 1. Lock and paper guard as above. Then `get_all_positions` and `get_orders`
-   (status open, nested).
+   (status **all**, nested): the open orders to cancel, and the filled legs
+   (ids, quantities, prices) step 3 records, including any that filled since
+   the last manage run.
 2. Any desk buy-stop from today still unfilled: cancel it as in "expire" and
    log the `SKIP`.
-3. For each symbol the log shows as `BUY` today:
+3. Run "manage" step 2 on the filled legs from step 1's status-all list, so
+   every leg that already filled today (T1, T2, stops) is in the broker's
+   fill log once.
+4. For each symbol the log shows as `BUY` today:
    - **Still open**: `get_orders` (status open, nested) and
      `cancel_order_by_id` each of its open bracket legs, then
-     `close_position` for that symbol only. Record the sell:
-     `python .claude/skills/trader-broker/ticket.py fill --symbol S --side sell --qty Q --price P`,
-     then `D log CLOSE S Q P "<the R it ended at>"`.
-   - **Already closed** (stop or target filled): find the filled leg in
-     `get_orders` (status closed), record it with `ticket.py fill`, and
-     `D log EXIT S Q P "stop hit, -1R"` (or "target hit, +2R").
-4. A position NOT bought by the desk today is not yours: leave it, log
+     `close_position` for that symbol only, which sells only the shares
+     still held (after a T1, the remaining half). Record that sell with
+     `D fill S --qty Q --price P --order-id <the close order's id>`, then
+     `D log CLOSE S Q P "<the R it ended at>"`.
+   - **Already closed** (stop or targets filled): its legs are recorded by
+     step 3; `D log EXIT S Q P "..."` only for a leg no earlier run logged.
+5. A position NOT bought by the desk today is not yours: leave it, log
    nothing, mention it in the report.
-5. Never call `close_all_positions` or `cancel_all_orders`. Unlock.
+6. Never call `close_all_positions` or `cancel_all_orders`. Unlock.
 
 ## Never
 

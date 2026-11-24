@@ -51,6 +51,17 @@ def test_t1_then_back_to_breakeven_keeps_half_an_r():
     assert t["r"] == 0.5 and t["how"] == "T1 then breakeven"
 
 
+def test_a_bar_that_hits_t1_and_dips_under_the_entry_stops_the_rest_at_breakeven():
+    # entry 100.01, stop 99, T1 101.02: one bar spans 99.80-101.50, then T2 trades.
+    # Ties go against the trade: the rest is out at breakeven in that bar, never at T2.
+    bars = flat_to_close(
+        session(RANGE + [(100.2, 99.7, 100.1), (101.5, 99.8, 101.2), (102.5, 101.0, 102.2)]),
+        102.2,
+    )
+    t = backtest.session_trade(bars, atr=2.0, k=2.0)
+    assert t["r"] == 0.5 and t["how"] == "T1 then breakeven"
+
+
 def test_stop_floor_widens_a_tight_range_and_a_stop_is_minus_one():
     tight = [(100, 99.9, 99.95), (99.98, 99.92, 99.95), (99.99, 99.93, 99.96)]
     bars = flat_to_close(session(tight + [(100.2, 99.95, 100.1), (100.1, 99.0, 99.2)]), 99.2)
@@ -71,6 +82,26 @@ def test_no_fill_before_945_or_when_it_would_chase():
     gap = session(RANGE + [(103, 102, 102.5)])  # 9:45 opens 2.5 % over the trigger
     gap[-1] = (gap[-1][0], 102.6, 103, 102, 102.5, 1000.0)
     assert backtest.session_trade(flat_to_close(gap, 102.5), atr=2.0, k=2.0) is None
+
+
+def test_a_cached_result_is_reused_only_for_the_same_rule(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    def fake(chart, sym, **rule):
+        calls.append(rule["min_stop_atr"])
+        best = {"n": 9, "avg_r": 0.1, "win_rate": 0.5, "total_r": 0.9, "max_dd_r": -1.0}
+        return {"symbol": sym, "best_t2": "2R", "best": best}
+
+    monkeypatch.setattr(backtest, "backtest_symbol", fake)
+    monkeypatch.setattr(backtest, "get_chart", lambda sym, off: {})
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"scout": {"min_stop_atr": 0.25}}))
+    backtest.main(["--symbols", "X", "--config", str(cfg)])
+    backtest.main(["--symbols", "X", "--config", str(cfg)])  # same rule: from the cache
+    cfg.write_text(json.dumps({"scout": {"min_stop_atr": 0.5}}))
+    backtest.main(["--symbols", "X", "--config", str(cfg)])  # new rule: run again
+    assert calls == [0.25, 0.5]
 
 
 def test_rank_keeps_winners_first_then_thin_and_drops_losers():

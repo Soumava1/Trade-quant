@@ -178,6 +178,20 @@ def test_arm_ready_writes_order_and_attempt_then_record_logs_buy(tmp_path):
     assert not f["pending"].exists()
 
 
+def test_an_exit_fill_reaches_the_broker_log_once_per_order(tmp_path):
+    tf = tmp_path / "desk-trades.json"
+    desk.save_trade({"symbol": "H1", "entry": 100.0, "order_ids": ["a", "b"]}, T, tf)
+    run = FakeRun()
+    assert "recorded the sale of 1 at 101.0" in desk.record_fill(
+        "H1", "1", "101.0", "tp-a", T, tf, run
+    )
+    assert "already recorded" in desk.record_fill("H1", "1", "101.0", "tp-a", T, tf, run)
+    desk.record_fill("H1", "2", "100.0", "sl-b", T, tf, run)
+    fills = [c for c in run.calls if c[1][0] == "fill"]
+    assert len(fills) == 2 and desk.load_trades(path=tf)["H1"]["fills"] == ["tp-a", "sl-b"]
+    assert desk.load_trades(path=tf)["H1"]["order_ids"] == ["a", "b"]  # the rest is kept
+
+
 def test_next_weekday_skips_the_weekend():
     friday = dt.datetime(2026, 11, 27, 16, 45, tzinfo=desk.NY)
     assert desk.next_weekday(friday).date() == dt.date(2026, 11, 30)
