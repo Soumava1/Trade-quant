@@ -2,7 +2,6 @@
   "permissions": {
     "ask": [
       "mcp__alpaca__cancel_order_by_id",
-      "mcp__alpaca__replace_order_by_id",
       "mcp__alpaca__close_position",
       "mcp__alpaca__update_account_config"
     ],
@@ -16,6 +15,7 @@
     ],
     "allow": [
       "mcp__alpaca__place_stock_order",
+      "mcp__alpaca__replace_order_by_id",
       "mcp__alpaca__get_account_info",
       "mcp__alpaca__get_all_positions",
       "mcp__alpaca__get_open_position",

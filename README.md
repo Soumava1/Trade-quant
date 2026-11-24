@@ -183,8 +183,11 @@ from your environment. On your own computer:
 - **Allowed without asking:** placing a stock order (`place_stock_order`), so
   the automatic paper desk can run unattended. The `.mcp.json` server is
   locked to paper and the desk's paper guard checks the account first.
-- **Ask every time:** changing, cancelling or closing an order (the desk's
-  flatten step asks).
+- **Allowed without asking:** changing an order (`replace_order_by_id`), so
+  the desk can raise the second half's stop to breakeven once T1 fills. The
+  desk only ever raises a stop to the entry; it never lowers one.
+- **Ask every time:** cancelling or closing an order (the desk's expire and
+  flatten steps ask).
 - **Blocked:** options, crypto, and "close or cancel everything".
 - **Allowed without asking:** read-only lookups (account, positions, orders,
   quotes).
