@@ -618,7 +618,18 @@ def step_features(opts: Options, c: Candidate) -> bool:
 
 
 def stop_spec(spec: str, c: Candidate) -> str:
-    """'atr-d:0.1' -> 'price:X' (X = entry - 0.1 x daily ATR, rounded down); others unchanged."""
+    """'atr-d:0.1' -> 'price:X' (X = entry - 0.1 x daily ATR, rounded down);
+    'orl-atr:0.25' -> the opening-range low, but never closer to the entry than 0.25 x the
+    daily ATR (so a tight range cannot give a stop the noise takes out); others unchanged."""
+    if spec.startswith("orl-atr:"):
+        k = float(spec.split(":", 1)[1])
+        entry, _ = entry_point(c)
+        atr = float((c.features or {}).get("atr") or 0)
+        or_low = ((c.entry or {}).get("opening_range") or {}).get("low")
+        if or_low is None:
+            return "or-low"
+        stop = min(float(or_low), entry - k * atr) if atr else float(or_low)
+        return f"price:{math.floor(stop * 100) / 100:.2f}"
     if not spec.startswith("atr-d:"):
         return spec
     k = float(spec.split(":", 1)[1])

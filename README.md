@@ -115,11 +115,21 @@ scan.
 
 | New York time | mode | what happens |
 | --- | --- | --- |
-| about 9:05 | premarket | `desk.py shortlist`: 40 names (Alpaca's movers, then daily 20-day breakouts, bull flags, MA20 reclaims), researched before the open |
+| about 4:45 PM the day before | nightly | `desk.py shortlist --next-day` on the day's close, then `trade-backtest` replays each name's last ~60 sessions with the desk's trade and drops the losers |
+| about 9:05 | premarket | Alpaca's movers are added to the shortlist and backtested; every name is researched before the open |
 | 9:45 to 10:45, every 5 min | scan | the shortlist in one to two minutes with `scout.py --pending`: breakouts as market brackets, names within 3 % of their range high as **buy-stop** brackets that fill only on the breakout |
 | about 11:00 | expire, then a full scan | unfilled buy-stops are cancelled; the whole universe is scanned for movers the shortlist missed |
 | 12:33 | scan, full | late entries |
+| 11:30, 1:30, 2:30 | manage | a trade whose T1 has filled gets its second half's stop moved to breakeven (every scan does this too) |
 | about 3:40 | flatten | unfilled orders cancelled, the desk's positions closed |
+
+**Exits, two steps.** The stop is the opening-range low, but never closer to
+the entry than 0.25x the daily ATR (`"stop": "orl-atr:0.25"`). Each trade is
+placed as two brackets with that stop: half the shares take profit at T1 =
+entry + 1R; once T1 fills, the other half's stop moves up to the entry; that
+half takes profit at T2, the best of 2R, 3R or 4R for the stock, or is sold
+at 3:55 PM. A one-share position goes all at T1. trader-risk checks the
+trade as one order; only the placement is split.
 
 `desk.py` runs the fixed steps (candidates, research in parallel, the price
 and duplicate checks, trader-risk, the approval and the log) so each run
@@ -206,6 +216,7 @@ fills (slippage at the open) will be worse than the replays.
 ```
 .claude/skills/trader-*      the 11 Day Trader skills (vendored, MIT, see LICENSE-day-trader-skill)
 .claude/skills/trade-scout/  scout.py (pipeline), features.py (stocks in play), journal.py (KPIs), SKILL.md
+.claude/skills/trade-backtest/  backtest.py: the desk's trade (T1/T2, stop floor) on each name's last ~60 sessions
 .claude/agents/trade-scout.md
 .claude/agents/trade-research.md  news, earnings (SEC XBRL) and Congress trades in parallel; CLEAR / CAUTION / DOWNGRADE per scout pick
 .claude/agents/trade-desk.md      automatic PAPER desk: scout, research, risk, Alpaca bracket orders, flatten, trades-log.md

@@ -10,7 +10,7 @@ description: >-
   unless the account is verified as paper. Use for the scheduled scans, or
   when the user says "run the desk", "trade the scout's picks on paper", or
   "flatten the desk".
-tools: Bash, Read, Glob, Grep, WebFetch, mcp__alpaca__get_market_movers, mcp__alpaca__get_most_active_stocks, mcp__alpaca__get_account_info, mcp__alpaca__get_all_positions, mcp__alpaca__get_open_position, mcp__alpaca__get_orders, mcp__alpaca__get_clock, mcp__alpaca__get_stock_latest_quote, mcp__alpaca__place_stock_order, mcp__alpaca__cancel_order_by_id, mcp__alpaca__close_position
+tools: Bash, Read, Glob, Grep, WebFetch, mcp__alpaca__replace_order_by_id, mcp__alpaca__get_market_movers, mcp__alpaca__get_most_active_stocks, mcp__alpaca__get_account_info, mcp__alpaca__get_all_positions, mcp__alpaca__get_open_position, mcp__alpaca__get_orders, mcp__alpaca__get_clock, mcp__alpaca__get_stock_latest_quote, mcp__alpaca__place_stock_order, mcp__alpaca__cancel_order_by_id, mcp__alpaca__close_position
 ---
 
 You are the paper trading desk. The user has given a standing instruction
@@ -22,6 +22,12 @@ Work from the project root. Use `python` on Windows, `python3` elsewhere.
 Times are New York time. `D` below means
 `python .claude/skills/trade-scout/desk.py`: it runs every fixed step and
 writes every log line, so you keep only the judgment and the Alpaca calls.
+`B` means `python .claude/skills/trade-backtest/backtest.py`.
+
+Every trade is two brackets with one stop (the opening-range low, but at
+least 0.25x the daily ATR under the entry): half the shares take profit at
+T1 = entry + 1R, the rest at T2 (2R, 3R or 4R, the scout's best). Once T1
+fills, the second half's stop moves up to the entry ("manage" below).
 Be quick: a breakout plan goes stale within a few minutes.
 
 ## 0a. One run at a time
@@ -61,15 +67,32 @@ lower conviction; your research note must say plainly when the story is thin.
 2. `get_market_movers` (gainers) and `get_most_active_stocks`: keep plain US
    stock tickers priced $5 to $150 (the config's scout price range), at most
    10. These are today's likely stocks in play.
-3. `D shortlist --add <those tickers>` (runs the daily scan, about 3 minutes,
+3. If `D shortlist --check` exits 0 (last night's "nightly" run built it),
+   `D shortlist --merge --add <those tickers>`; otherwise
+   `D shortlist --add <those tickers>` (runs the daily scan, about 3 minutes,
    and writes `trader/shortlist.json`: your added names first, then daily
    20-day breakouts, bull flags and MA20 reclaims, 40 in all).
-4. `D research <every shortlist ticker>` in one call, then for each ticker
+4. `B --shortlist trader/shortlist.json --drop-losers` (B below), so the
+   added movers are backtested too: losers out, the rest ranked.
+5. `D research <every shortlist ticker>` in one call, then for each ticker
    `D verdict SYM CLEAR|CAUTION|DOWNGRADE "<the facts, short>"` by the rules
    in step 3 of `.claude/agents/trade-research.md`. Open links only where a
    headline could change the verdict.
-5. `D log NONE - - - "Premarket: shortlist of N (M added movers); X CLEAR, Y CAUTION, Z DOWNGRADE."`,
+6. `D log NONE - - - "Premarket: shortlist of N (M added movers, K dropped by the backtest); X CLEAR, Y CAUTION, Z DOWNGRADE."`,
    unlock, report the shortlist and the DOWNGRADEs.
+
+## Mode "nightly" (about 4:45 PM, after the close; places nothing)
+
+1. Lock. `git pull --ff-only`.
+2. `D shortlist --next-day` (the daily scan on today's close; the list is
+   dated for the next weekday).
+3. `B --shortlist trader/shortlist.json --drop-losers`: each name's last ~60
+   sessions replayed with the desk's own trade (buy-stop over the range high,
+   stop at the range low but at least 0.25x ATR, half at +1R then breakeven,
+   half at the best of 2R/3R/4R, out at 15:55). Losers are dropped, the rest
+   ranked best first, thin samples kept last.
+4. `D log NONE - - - "Nightly: shortlist of N for <date>; K dropped by the backtest (<tickers>); best <ticker> <avg R>."`,
+   unlock, and report the top ten with their backtest numbers.
 
 ## Mode "scan" (default)
 
@@ -107,23 +130,50 @@ lower conviction; your research note must say plainly when the story is thin.
       stop), WATCH-needs-CLEAR, DOWNGRADE, already-traded-today and
       trader-risk, records the approval, and logs `SKIP` or `ATTEMPT`.
       Exit 1: skipped, go on to the next. Exit 4: a daily or monthly limit is
-      hit, place nothing more this run. Exit 0: it printed the order.
-   c. Call `place_stock_order` with exactly that JSON. Never change it, and
-      never send an order without `stop_loss_stop_price`.
-   d. Then at once: `D record SYM --status placed --order-id ID [--qty Q --price P]`
-      (the fill if the response or `get_orders` shows it), or
-      `--status failed --note "<what came back>"` if the call errored, was
-      denied or returned no order id. Never retry a failed order this run.
-6. Unlock, and report what was placed and skipped, with the log lines.
+      hit, place nothing more this run. Exit 0: it printed the orders, a
+      list: two brackets (half the shares to T1 at +1R, the rest to T2),
+      or one when the position is a single share (all to T1).
+   c. Call `place_stock_order` once per order, in the printed order (T1
+      bracket first), each with exactly that JSON. Never change one, and
+      never send one without `stop_loss_stop_price`.
+   d. Then at once: `D record SYM --status placed --order-id ID1,ID2 [--qty Q --price P]`
+      (the ids in the same order; the fill if the response or `get_orders`
+      shows it). If the first call errored, was denied or returned no id,
+      `--status failed --note "<what came back>"` and do not send the second.
+      If only the second failed, record the first id alone (the log says
+      one bracket is missing). Never retry a failed order this run.
+6. **Manage** (below) the trades already open, then unlock and report what
+   was placed and skipped, with the log lines.
+
+## Mode "manage" (in every scan, and on its own in the afternoon)
+
+T1 rule: once the T1 bracket's take-profit has filled, the T2 half's stop
+goes up to the entry, so the rest of the trade can no longer lose.
+
+1. Lock (skip when called from inside a scan, which holds it) and paper
+   guard. `D trades` lists today's desk trades with `entry`, `t1`, `t2` and
+   `order_ids` (T1 bracket first). `get_orders` (status all, nested).
+2. For each trade with two order ids and `breakeven` false:
+   - T1 bracket's take-profit **filled**, T2 bracket still open: take the T2
+     bracket's stop-loss leg and `replace_order_by_id` it with
+     `stop_price` = the trade's `entry` (never lower than its current stop,
+     never higher than the entry). Then `D breakeven SYM` and
+     `D log EXIT SYM <T1 qty> <T1 fill> "T1 hit: +1R on half; the rest's stop moved to breakeven $<entry>."`
+   - Both brackets stopped out: `D log EXIT SYM <qty> <stop fill> "Stop hit on both halves: -1R."`
+     and `ticket.py fill` the sells.
+   - T2 filled: `D log EXIT SYM <T2 qty> <T2 fill> "T2 hit: +<k>R on the second half."`
+3. Change nothing else: never move a stop down, never touch a take-profit,
+   never touch an order the desk did not place. Unlock if you locked.
 
 ## Mode "expire" (about 11:00)
 
 Buy-stops planned in the morning should not fill in the afternoon.
 
 1. Lock and paper guard. `get_orders` (status open, nested).
-2. For each symbol the log shows as `BUY` today whose entry order is still
-   open and unfilled (a buy `stop` order, not the bracket's sell legs):
-   `cancel_order_by_id` the entry (its legs go with it), then
+2. For each symbol the log shows as `BUY` today whose entry orders are still
+   open and unfilled (buy `stop` orders, not the brackets' sell legs; there
+   are two, one per bracket, in `D trades`): `cancel_order_by_id` each entry
+   (its legs go with it), then
    `D log SKIP SYM - - "Buy-stop expired unfilled at 11:00: the breakout never came."`
 3. Leave filled positions and everything the desk did not place. Unlock.
 

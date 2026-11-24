@@ -12,7 +12,7 @@ Usage (from the project root):
     python desk.py research MOD PDD              # news, earnings, Congress, in parallel
     python desk.py arm MOD --ask 141.40 --research CAUTION --note "+13% move, no news found"
                                                  # exit 0: prints the place_stock_order JSON
-    python desk.py record MOD --status placed --order-id ID --qty 1 --price 141.38
+    python desk.py record MOD --status placed --order-id ID1,ID2 --qty 2 --price 141.38
     python desk.py log NONE - - - "0 HIGH, no PICK; 17 rejected, mostly failed breakouts."
     python desk.py unlock
 
@@ -279,6 +279,15 @@ def build_shortlist(
     }
 
 
+def next_weekday(now: dt.datetime) -> dt.datetime:
+    """The next Monday-to-Friday date. ponytail: market holidays are not skipped; on one,
+    the shortlist simply goes unused and the 9:05 run builds a fresh one."""
+    d = now + dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d += dt.timedelta(days=1)
+    return d
+
+
 def shortlist_today(path: Path = SHORTLIST, now: dt.datetime | None = None) -> bool:
     """True when the shortlist file exists and was built today (New York time)."""
     if not path.exists():
@@ -391,6 +400,19 @@ def describe(c: dict[str, Any], verdict: str, note: str = "") -> str:
     return f"{text} ({note.strip().rstrip('.')})" if note.strip() else text
 
 
+def split_t1_t2(order: dict[str, Any], entry: float, stop: float) -> list[dict[str, Any]]:
+    """One approved bracket -> the two the desk places: half the shares take profit at T1
+    (entry + 1R), the rest at the plan's T2; both share the entry and the stop. After T1
+    fills, the desk moves the second bracket's stop to the entry (breakeven).
+    One share cannot be split: it all goes at T1, banking +1R."""
+    t1 = f"{round(entry + (entry - stop), 2):.2f}"
+    q = int(float(order["qty"]))
+    if q < 2:
+        return [order | {"take_profit_limit_price": t1}]
+    q1 = q // 2
+    return [order | {"qty": str(q1), "take_profit_limit_price": t1}, order | {"qty": str(q - q1)}]
+
+
 def traded_today(log: Path, symbol: str, now: dt.datetime) -> bool:
     if not log.exists():
         return False
@@ -466,26 +488,58 @@ def arm(
     if "Recorded" not in a.stdout:
         return skip(f"Approval not recorded: {(a.stdout or a.stderr).strip()[:200]}")
     order, _ = json.JSONDecoder().raw_decode(a.stdout[a.stdout.index("{") :])
+    legs = split_t1_t2(order, entry, stop)  # trader-risk passed the whole; this splits it
     reason = describe(c, verdict, note)
     qty = (c.get("size") or {}).get("qty") or order.get("qty")
-    pending.parent.mkdir(parents=True, exist_ok=True)
     stop_entry = order.get("type") == "stop"
+    t1 = legs[0]["take_profit_limit_price"]
+    t2 = legs[-1].get("take_profit_limit_price") if len(legs) > 1 else None
+    pending.parent.mkdir(parents=True, exist_ok=True)
     pending.write_text(
         json.dumps(
-            {"symbol": sym, "qty": qty, "entry": entry, "reason": reason, "stop_entry": stop_entry}
+            {
+                "symbol": sym,
+                "qty": qty,
+                "entry": entry,
+                "stop": stop,
+                "t1": t1,
+                "t2": t2,
+                "legs": [leg["qty"] for leg in legs],
+                "reason": reason,
+                "stop_entry": stop_entry,
+            }
         ),
         encoding="utf-8",
     )
-    log_line(
-        "ATTEMPT",
-        sym,
-        str(qty),
-        f"~{entry}",
-        f"Bracket: stop ${stop:.2f}, target ${float(plan['target']):.2f}; {reason}",
-        log,
-        now,
+    exits = (
+        f"{legs[0]['qty']} sh at T1 ${t1}, {legs[1]['qty']} sh at T2 ${t2}"
+        if t2
+        else f"1 sh at T1 ${t1} (one share cannot be split)"
     )
-    return READY, order
+    log_line(
+        "ATTEMPT", sym, str(qty), f"~{entry}", f"Stop ${stop:.2f}; {exits}; {reason}", log, now
+    )
+    return READY, legs
+
+
+def trades_path(now: dt.datetime | None = None) -> Path:
+    return Path("trader/state") / f"desk-trades-{(now or now_ny()):%Y-%m-%d}.json"
+
+
+def load_trades(now: dt.datetime | None = None, path: Path | None = None) -> dict[str, Any]:
+    path = path or trades_path(now)
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def save_trade(
+    trade: dict[str, Any], now: dt.datetime | None = None, path: Path | None = None
+) -> None:
+    """Today's desk trades by symbol: what `manage` needs to move a stop to breakeven."""
+    path = path or trades_path(now)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = load_trades(path=path)
+    data[trade["symbol"]] = data.get(trade["symbol"], {}) | trade
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def record(
@@ -499,6 +553,7 @@ def record(
     log: Path = LOG,
     pending: Path = PENDING,
     run=py,
+    trades: Path | None = None,
 ) -> str:
     """What came back from place_stock_order: the broker record, and BUY or SKIP in the log."""
     sym = symbol.upper()
@@ -519,13 +574,40 @@ def record(
         print(f"ticket.py result: {(r.stderr or r.stdout).strip()}", file=sys.stderr)
     if status == "placed":
         fill = str(price) if price else f"~{p['entry']}"
+        legs = p.get("legs") or [p["qty"]]
+        ids = [i for i in order_id.split(",") if i.strip()]
+        if p.get("t2"):
+            plan = (
+                f"{legs[0]} sh to T1 ${p['t1']} (then the rest's stop to breakeven), "
+                f"{legs[1]} sh to T2 ${p['t2']}"
+            )
+        else:
+            plan = f"all to T1 ${p.get('t1')}"
+        if len(ids) < len(legs):
+            plan += f"; only {len(ids)} of {len(legs)} brackets placed"
         if price:
             tail = ""
         elif p.get("stop_entry"):
             tail = " Buy-stop resting at the range high: fills only on the breakout."
         else:
             tail = " Fill not reported yet."
-        line = log_line("BUY", sym, str(qty or p["qty"]), fill, p["reason"] + "." + tail, log, now)
+        why = f"{plan}; {p['reason']}.{tail}"
+        line = log_line("BUY", sym, str(qty or p["qty"]), fill, why, log, now)
+        save_trade(
+            {
+                "symbol": sym,
+                "entry": p["entry"],
+                "stop": p.get("stop"),
+                "t1": p.get("t1"),
+                "t2": p.get("t2"),
+                "legs": legs,
+                "order_ids": ids,  # T1 bracket first, then T2
+                "stop_entry": p.get("stop_entry", False),
+                "breakeven": False,
+            },
+            now,
+            trades,
+        )
     else:
         why = f"Order {status}: {note or 'no detail came back'}; {p['reason']}"
         line = log_line("SKIP", sym, "-", f"~{p['entry']}", why, log, now)
@@ -555,6 +637,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--size", type=int, default=40)
     p.add_argument("--daily", type=Path, help="a saved `scan.py daily --json` (default: run it)")
     p.add_argument("--check", action="store_true", help="exit 0 if today's shortlist exists")
+    p.add_argument("--next-day", action="store_true", help="after the close: for tomorrow")
+    p.add_argument(
+        "--merge", action="store_true", help="keep today's shortlist, put the --add names on top"
+    )
+    p = sub.add_parser("trades", help="today's desk trades (entry, stop, T1, T2, order ids)")
+    p = sub.add_parser("breakeven", help="mark a trade's stop as moved to breakeven")
+    p.add_argument("symbol", type=str.upper)
     p = sub.add_parser("verdict", help="keep today's research verdict for a ticker")
     p.add_argument("symbol", type=str.upper)
     p.add_argument("verdict", choices=VERDICTS, type=str.upper)
@@ -570,7 +659,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("record", help="write down what place_stock_order returned")
     p.add_argument("symbol", type=str.upper)
     p.add_argument("--status", required=True, choices=["placed", "failed", "denied"])
-    p.add_argument("--order-id", default="")
+    p.add_argument("--order-id", default="", help="the order ids, comma-separated (T1,T2)")
     p.add_argument("--qty", default="")
     p.add_argument("--price", default="")
     p.add_argument("--note", default="")
@@ -588,6 +677,15 @@ def main(argv: list[str] | None = None) -> int:
             ok = shortlist_today()
             print(f"{SHORTLIST} is {'from today' if ok else 'missing or old'}")
             return 0 if ok else 1
+        if a.merge and shortlist_today():
+            doc = json.loads(SHORTLIST.read_text(encoding="utf-8"))
+            have = [h["symbol"] for h in doc["hits"]]
+            new = [{"symbol": s, "why": "added: mover or news"} for s in a.add if s not in have]
+            doc["hits"] = new + doc["hits"]
+            SHORTLIST.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            print(f"Added {len(new)} to today's shortlist ({len(doc['hits'])} names).")
+            print(" ".join(h["symbol"] for h in doc["hits"]))
+            return 0
         if a.daily:
             daily = json.loads(a.daily.read_text(encoding="utf-8-sig"))  # PowerShell adds a BOM
         else:
@@ -598,14 +696,31 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"daily scan failed: {(r.stderr or r.stdout).strip()[:300]}", file=sys.stderr)
                 daily = {"hits": []}  # the added names still make a shortlist
         scout_cfg = read_config().get("scout", {})
+        when = next_weekday(now_ny()) if a.next_day else now_ny()
         doc = build_shortlist(
-            daily, a.add, scout_cfg.get("min_price", 5), scout_cfg.get("max_price", 150), a.size
+            daily,
+            a.add,
+            scout_cfg.get("min_price", 5),
+            scout_cfg.get("max_price", 150),
+            a.size,
+            now=when,
         )
         SHORTLIST.parent.mkdir(parents=True, exist_ok=True)
         SHORTLIST.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote {SHORTLIST}: {len(doc['hits'])} names (daily scan of {daily.get('as_of')}).")
         print(" ".join(h["symbol"] for h in doc["hits"]))
         return 0 if doc["hits"] else 1
+    if a.cmd == "trades":
+        print(json.dumps(load_trades(), indent=2))
+        return 0
+    if a.cmd == "breakeven":
+        t = load_trades().get(a.symbol)
+        if not t:
+            print(f"No desk trade in {a.symbol} today.", file=sys.stderr)
+            return 2
+        save_trade(t | {"breakeven": True})
+        print(f"{a.symbol}: stop on the T2 half marked as moved to breakeven ${t['entry']}.")
+        return 0
     if a.cmd == "verdict":
         print(json.dumps({a.symbol: save_verdict(a.symbol, a.verdict, a.note)}))
         return 0
@@ -615,7 +730,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "arm":
         code, order = arm(a.symbol, a.ask, a.research, a.note, a.summary)
         if code == READY:
-            print("READY. Call place_stock_order with exactly:")
+            print(f"READY. Call place_stock_order once per order below ({len(order)}), exactly:")
             print(json.dumps(order, indent=2))
         else:
             print(
