@@ -11,6 +11,8 @@ dependencies = []
 dev = [
     "pytest>=8.3,<10",
     "ruff>=0.11,<1",
+    # zoneinfo has no time-zone database on Windows without it
+    "tzdata>=2024.1",
 ]
 
 [tool.pytest.ini_options]

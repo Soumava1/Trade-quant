@@ -1,4 +1,4 @@
-{
+﻿{
   "permissions": {
     "ask": [
       "mcp__alpaca__cancel_order_by_id",
@@ -22,7 +22,33 @@
       "mcp__alpaca__get_orders",
       "mcp__alpaca__get_clock",
       "mcp__alpaca__get_stock_snapshot",
-      "mcp__alpaca__get_stock_latest_quote"
+      "mcp__alpaca__get_stock_latest_quote",
+      "mcp__alpaca__get_market_movers",
+      "mcp__alpaca__get_most_active_stocks",
+      "Bash(python .claude/skills/trade-scout/desk.py:*)",
+      "Bash(python .claude/skills/trade-scout/scout.py:*)",
+      "Bash(python .claude/skills/trade-scout/journal.py report:*)",
+      "Bash(python .claude/skills/trader-risk/check.py:*)",
+      "Bash(python .claude/skills/trader-broker/ticket.py:*)",
+      "Bash(python .claude/skills/trader-scanner/scan.py universe:*)",
+      "Bash(python .claude/skills/trader-news/news.py:*)",
+      "Bash(python .claude/skills/trader-analyst/facts.py:*)",
+      "Bash(python .claude/skills/trader-pelosi/ptr.py:*)",
+      "Bash(git pull --ff-only)",
+      "Bash(git -C * pull --ff-only)",
+      "PowerShell(python .claude/skills/trade-scout/desk.py:*)",
+      "PowerShell(python .claude/skills/trade-scout/scout.py:*)",
+      "PowerShell(python .claude/skills/trade-scout/journal.py report:*)",
+      "PowerShell(python .claude/skills/trader-risk/check.py:*)",
+      "PowerShell(python .claude/skills/trader-broker/ticket.py:*)",
+      "PowerShell(python .claude/skills/trader-scanner/scan.py universe:*)",
+      "PowerShell(python .claude/skills/trader-news/news.py:*)",
+      "PowerShell(python .claude/skills/trader-analyst/facts.py:*)",
+      "PowerShell(python .claude/skills/trader-pelosi/ptr.py:*)",
+      "PowerShell(git pull --ff-only)",
+      "PowerShell(git -C * pull --ff-only)",
+      "Edit(/trader/**)",
+      "WebFetch"
     ]
   }
 }

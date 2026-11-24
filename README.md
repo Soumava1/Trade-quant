@@ -105,10 +105,26 @@ python3 .claude/skills/trade-scout/journal.py report             # the KPIs
 about 10:45, and late entries can still be found until 3:30 PM. A full scan
 takes 5 to 10 minutes.
 
-**Scheduled runs:** Claude runs the scout on trading days at 9:47, 9:58,
-10:12, 10:27 and 10:44 AM and 12:33 PM New York time, and settles the journal
-at 4:07 PM. It posts each summary and commits the journal to `main`. Entries
-before 9:45 are blocked by the config, so 9:47 is the first useful scan.
+**Scheduled runs (cloud):** Claude runs the scout on trading days at 9:47,
+9:58, 10:12, 10:27 and 10:44 AM and 12:33 PM New York time, and settles the
+journal at 4:07 PM. It posts each summary and commits the journal to `main`.
+Entries before 9:45 are blocked by the config, so 9:47 is the first useful
+scan.
+
+**The desk's day (on your computer):**
+
+| New York time | mode | what happens |
+| --- | --- | --- |
+| about 9:05 | premarket | `desk.py shortlist`: 40 names (Alpaca's movers, then daily 20-day breakouts, bull flags, MA20 reclaims), researched before the open |
+| 9:45 to 10:45, every 5 min | scan | the shortlist in one to two minutes with `scout.py --pending`: breakouts as market brackets, names within 3 % of their range high as **buy-stop** brackets that fill only on the breakout |
+| about 11:00 | expire, then a full scan | unfilled buy-stops are cancelled; the whole universe is scanned for movers the shortlist missed |
+| 12:33 | scan, full | late entries |
+| about 3:40 | flatten | unfilled orders cancelled, the desk's positions closed |
+
+`desk.py` runs the fixed steps (candidates, research in parallel, the price
+and duplicate checks, trader-risk, the approval and the log) so each run
+spends its time on the trade, not on plumbing. A lock keeps two runs from
+trading at once.
 
 **To take a trade on paper:** run `/trader-risk` on it (which records the
 PASS), then `/trader-broker`. It needs your explicit yes and a connected
@@ -120,9 +136,10 @@ with the research desk, puts each through `trader-risk`, and places the ones tha
 on the Alpaca **paper** account without asking. Before 3:55 PM its
 "flatten" mode closes what it bought that day. It refuses to place anything
 unless `"paper": true`, `ALPACA_PAPER_TRADE` is `"true"` and the account
-number starts with `PA`. Every decision (buy, skip, exit, close, nothing,
-halt) gets one line in `trades-log.md` with time, symbol, action, size,
-price and an honest one-sentence reason. That file stays on your computer.
+number starts with `PA`. Every decision (attempt, buy, skip, exit, close,
+nothing, halt) gets one line in `trades-log.md` with time, symbol, action,
+size, price and an honest one-sentence reason. That file stays on your
+computer.
 
 WATCH is a deliberately loosened gate: those setups have positive odds but
 missed one scout gate. The desk trades one only when research says CLEAR (a
