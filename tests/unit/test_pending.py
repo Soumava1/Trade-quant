@@ -30,6 +30,15 @@ def test_a_name_too_far_under_its_range_high_is_not_armed():
     assert c.status == "stopped" and "within 3%" in c.reasons[0] and not c.pending
 
 
+def test_stop_is_the_range_low_but_never_closer_than_a_quarter_atr():
+    c = scout.Candidate(symbol="X", scan={})
+    c.entry = {"opening_range": {"low": 99.90}, "trigger": {"price": 100.01, "bar_index": 3}}
+    c.features = {"atr": 2.0}
+    assert scout.stop_spec("orl-atr:0.25", c) == "price:99.51"  # tight range: the floor
+    c.entry["opening_range"]["low"] = 98.50
+    assert scout.stop_spec("orl-atr:0.25", c) == "price:98.50"  # wide range: the range low
+
+
 def test_watch_symbols_reads_symbols_or_a_watchlist(tmp_path):
     wl = tmp_path / "shortlist.json"
     wl.write_text('{"hits": [{"symbol": "pdd"}, {"symbol": "MOD"}]}', encoding="utf-8")

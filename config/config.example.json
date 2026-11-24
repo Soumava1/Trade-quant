@@ -23,7 +23,8 @@
   "pdt_guard": false,
   "max_monthly_loss_usd": 80,
   "scout": {
-    "stop": "or-low,atr-d:0.1",
+    "stop": "orl-atr:0.25",
+    "min_stop_atr": 0.25,
     "target": "2R,3R,4R",
     "top": 2,
     "min_price": 5,

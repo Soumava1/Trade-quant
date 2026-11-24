@@ -112,6 +112,7 @@ class FakeRun:
             return subprocess.CompletedProcess(args, 0, json.dumps(out), "")
         if args[0] == "approve":
             order = {"symbol": "H1", "side": "buy", "qty": "3", "stop_loss_stop_price": "99.0"}
+            order["take_profit_limit_price"] = "102.0"
             text = "Recorded your yes.\nNow call place_stock_order with exactly:\n"
             return subprocess.CompletedProcess(args, 0, text + json.dumps(order) + "\nmore", "")
         return subprocess.CompletedProcess(args, 0, "Recorded order 1 as placed.", "")
@@ -145,30 +146,57 @@ def test_arm_skips_stale_downgraded_watch_caution_and_repeats(tmp_path):
 
 
 def test_arm_ready_writes_order_and_attempt_then_record_logs_buy(tmp_path):
-    (code, order), f, run = arm(tmp_path, "H1", 100.2)
-    assert code == desk.READY and order["stop_loss_stop_price"] == "99.0"
+    (code, legs), f, run = arm(tmp_path, "H1", 100.2)
+    assert code == desk.READY and [leg["qty"] for leg in legs] == ["1", "2"]  # T1 half, T2 rest
+    assert legs[0]["take_profit_limit_price"] == "101.00"  # entry 100 + 1R (stop 99)
+    assert all(leg["stop_loss_stop_price"] == "99.0" for leg in legs)
     assert [c[0] for c in run.calls] == ["trader-risk/check.py", "trader-broker/ticket.py"]
-    written = json.loads(f["orders"].read_text())["orders"][0]
-    assert written["symbol"] == "H1"
-    assert written["plan"] == {"entry": 100.0, "stop": 99.0, "target": 102.0}  # risk needs it
+    written = json.loads(f["orders"].read_text())["orders"]
+    assert len(written) == 1 and written[0]["symbol"] == "H1"  # risk sees ONE trade
+    assert written[0]["plan"] == {"entry": 100.0, "stop": 99.0, "target": 102.0}
     log = f["log"].read_text(encoding="utf-8")
-    assert "| H1 | ATTEMPT | 3 sh | ~$100.00 | Bracket: stop $99.00, target $102.00;" in log
+    assert "| H1 | ATTEMPT | 3 sh | ~$100.00 | Stop $99.00; 1 sh at T1 $101.00, 2 sh at T2" in log
     assert "Passed every gate (score 70, 2R target); research CLEAR" in log
     assert arm(tmp_path, "H1", 100.2)[0][0] == desk.SKIPPED  # already traded today
 
     line = desk.record(
         "H1",
         "placed",
-        "abc",
+        "abc,def",
         "3",
         "100.21",
         now=T,
         log=f["log"],
         pending=f["pending"],
         run=FakeRun(),
+        trades=tmp_path / "desk-trades.json",
     )
-    assert "| H1 | BUY | 3 sh | $100.21 | Passed every gate" in line
+    assert "| H1 | BUY | 3 sh | $100.21 | 1 sh to T1 $101.00 (then the rest's stop to" in line
+    kept = desk.load_trades(path=tmp_path / "desk-trades.json")["H1"]
+    assert kept["order_ids"] == ["abc", "def"] and kept["entry"] == 100.0 and not kept["breakeven"]
+    assert "2 sh to T2 $102.0; Passed every gate" in line
     assert not f["pending"].exists()
+
+
+def test_next_weekday_skips_the_weekend():
+    friday = dt.datetime(2026, 11, 27, 16, 45, tzinfo=desk.NY)
+    assert desk.next_weekday(friday).date() == dt.date(2026, 11, 30)
+    assert desk.next_weekday(T).date() == dt.date(2026, 11, 24)
+
+
+def test_one_share_goes_all_at_t1_and_a_missing_bracket_is_said():
+    order = {
+        "symbol": "X",
+        "qty": "1",
+        "take_profit_limit_price": "103",
+        "stop_loss_stop_price": "99",
+    }
+    assert desk.split_t1_t2(order, 100.0, 99.0) == [order | {"take_profit_limit_price": "101.00"}]
+    legs = desk.split_t1_t2(order | {"qty": "5"}, 100.0, 99.0)
+    assert [(leg["qty"], leg["take_profit_limit_price"]) for leg in legs] == [
+        ("2", "101.00"),
+        ("3", "103"),
+    ]
 
 
 def test_arm_risk_block_on_a_daily_limit_stops_the_run(tmp_path):
@@ -244,15 +272,18 @@ def test_arm_and_record_with_the_real_risk_check_and_ticket(tmp_path, monkeypatc
     stop_entry["pending"] = {"price": 86.03}
     summary = write_summary(tmp_path, [cand("MOD", "HIGH", 70, 141.35, 140.01, 145.37), stop_entry])
 
-    code, order = desk.arm("MOD", 141.40, "CLEAR", summary_path=summary, now=T)
+    code, legs = desk.arm("MOD", 141.40, "CLEAR", summary_path=summary, now=T)
     assert code == desk.READY, (tmp_path / "trades-log.md").read_text(encoding="utf-8")
-    assert order["type"] == "market" and "plan" not in order  # nothing of ours goes to Alpaca
-    desk.record("MOD", "placed", "id-1", "3", "141.38", now=T)
+    assert all(leg["type"] == "market" and "plan" not in leg for leg in legs)  # ours stays home
+    assert [leg["take_profit_limit_price"] for leg in legs] == ["142.69", "145.37"]  # T1, T2
+    desk.record("MOD", "placed", "id-1,id-2", "3", "141.38", now=T)
 
-    code, order = desk.arm("PDD", 85.70, "CLEAR", summary_path=summary, now=T)
-    assert code == desk.READY and order["type"] == "stop" and order["stop_price"] == "86.03"
-    line = desk.record("PDD", "placed", "id-2", now=T)
+    code, legs = desk.arm("PDD", 85.70, "CLEAR", summary_path=summary, now=T)
+    assert code == desk.READY and all(leg["type"] == "stop" for leg in legs)
+    assert [leg["qty"] for leg in legs] == ["1", "1"] and legs[0]["stop_price"] == "86.03"
+    line = desk.record("PDD", "placed", "id-3", now=T)
     assert "Buy-stop resting at the range high" in line and "not broken out yet" in line
+    assert "only 1 of 2 brackets placed" in line
 
 
 def test_cli_lock_exit_codes(tmp_path):

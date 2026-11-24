@@ -2,7 +2,6 @@
   "permissions": {
     "ask": [
       "mcp__alpaca__cancel_order_by_id",
-      "mcp__alpaca__replace_order_by_id",
       "mcp__alpaca__close_position",
       "mcp__alpaca__update_account_config"
     ],
@@ -16,6 +15,7 @@
     ],
     "allow": [
       "mcp__alpaca__place_stock_order",
+      "mcp__alpaca__replace_order_by_id",
       "mcp__alpaca__get_account_info",
       "mcp__alpaca__get_all_positions",
       "mcp__alpaca__get_open_position",
@@ -28,6 +28,7 @@
       "Bash(python .claude/skills/trade-scout/desk.py:*)",
       "Bash(python .claude/skills/trade-scout/scout.py:*)",
       "Bash(python .claude/skills/trade-scout/journal.py report:*)",
+      "Bash(python .claude/skills/trade-backtest/backtest.py:*)",
       "Bash(python .claude/skills/trader-risk/check.py:*)",
       "Bash(python .claude/skills/trader-broker/ticket.py:*)",
       "Bash(python .claude/skills/trader-scanner/scan.py universe:*)",
@@ -39,6 +40,7 @@
       "PowerShell(python .claude/skills/trade-scout/desk.py:*)",
       "PowerShell(python .claude/skills/trade-scout/scout.py:*)",
       "PowerShell(python .claude/skills/trade-scout/journal.py report:*)",
+      "PowerShell(python .claude/skills/trade-backtest/backtest.py:*)",
       "PowerShell(python .claude/skills/trader-risk/check.py:*)",
       "PowerShell(python .claude/skills/trader-broker/ticket.py:*)",
       "PowerShell(python .claude/skills/trader-scanner/scan.py universe:*)",
