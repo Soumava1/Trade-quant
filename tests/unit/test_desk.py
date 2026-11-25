@@ -40,11 +40,15 @@ def test_log_keeps_the_reason_on_one_line_and_rejects_bad_input(tmp_path):
 
 def test_lock_blocks_a_second_run_until_released_or_stale(tmp_path):
     lock = tmp_path / "state" / "desk.lock"
-    assert desk.acquire("scan 10:12", path=lock, now=T)[0]
-    ok, msg = desk.acquire("scan 10:27", path=lock, now=T + dt.timedelta(minutes=15))
-    assert not ok and "scan 10:12" in msg
-    assert desk.acquire("scan 11:30", path=lock, now=T + dt.timedelta(minutes=50))[0]  # stale
-    desk.release(lock)
+    ok, _, first = desk.acquire("scan 10:12", path=lock, now=T)
+    assert ok and first and f"token {first}" in lock.read_text(encoding="utf-8")
+    ok, msg, tok = desk.acquire("scan 10:27", path=lock, now=T + dt.timedelta(minutes=15))
+    assert not ok and tok is None and "scan 10:12" in msg
+    ok, _, second = desk.acquire("scan 11:30", path=lock, now=T + dt.timedelta(minutes=50))
+    assert ok and second != first  # the stale lock was taken over
+    assert not desk.release(lock, first)  # the stale run's late unlock: the takeover keeps it
+    assert lock.exists() and "scan 11:30" in lock.read_text(encoding="utf-8")
+    assert desk.release(lock, second) and not lock.exists()
     assert desk.acquire("scan 12:33", path=lock, now=T)[0]
 
 
@@ -118,7 +122,7 @@ class FakeRun:
         return subprocess.CompletedProcess(args, 0, "Recorded order 1 as placed.", "")
 
 
-def arm(tmp_path, sym, ask, verdict="CLEAR", run=None, cands=None):
+def arm(tmp_path, sym, ask, verdict="CLEAR", run=None, cands=None, now=T):
     p = write_summary(
         tmp_path, cands or [cand("H1", "HIGH", 70), cand("W1", "WATCH", 30, reason=TM)]
     )
@@ -128,8 +132,20 @@ def arm(tmp_path, sym, ask, verdict="CLEAR", run=None, cands=None):
         "orders": tmp_path / "orders.json",
         "pending": tmp_path / "pending.json",
     }
-    out = desk.arm(sym, ask, verdict, summary_path=p, now=T, run=run, **files)
+    out = desk.arm(sym, ask, verdict, summary_path=p, now=now, run=run, **files)
     return out, files, run
+
+
+def test_arm_skips_a_buy_stop_plan_from_the_1100_cutoff(tmp_path):
+    stop_entry = cand("PDD", "HIGH", 60)
+    stop_entry["order"] |= {"type": "stop", "stop_price": "100.00"}
+    late = T.replace(hour=11, minute=5)
+    (code, _), f, run = arm(tmp_path, "PDD", 99.8, cands=[stop_entry], now=late)
+    assert code == desk.SKIPPED and not run.calls
+    assert "Buy-stop plan after the 11:00 cutoff" in f["log"].read_text(encoding="utf-8")
+    other = tmp_path / "market"
+    other.mkdir()
+    assert arm(other, "H1", 100.2, now=late)[0][0] == desk.READY  # a market entry still goes
 
 
 def test_arm_skips_stale_downgraded_watch_caution_and_repeats(tmp_path):
@@ -303,6 +319,13 @@ def test_arm_and_record_with_the_real_risk_check_and_ticket(tmp_path, monkeypatc
 def test_cli_lock_exit_codes(tmp_path):
     lock = tmp_path / "desk.lock"
     assert desk.main(["lock", "--owner", "a", "--path", str(lock)]) == 0
+    token = lock.read_text(encoding="utf-8").strip().partition(" token ")[2]
     assert desk.main(["lock", "--owner", "b", "--path", str(lock)]) == desk.BUSY
-    assert desk.main(["unlock", "--path", str(lock)]) == 0
+    assert desk.main(["unlock", "--path", str(lock), "--token", "someone-else"]) == 0
+    assert lock.exists()  # not this run's lock: left in place, with a warning
+    assert desk.main(["unlock", "--path", str(lock), "--token", token]) == 0
     assert not lock.exists()
+    desk.main(["lock", "--owner", "c", "--path", str(lock)])
+    assert desk.main(["unlock", "--path", str(lock), "--force"]) == 0 and not lock.exists()
+    with pytest.raises(SystemExit):
+        desk.main(["unlock", "--path", str(lock)])  # --token or --force is required

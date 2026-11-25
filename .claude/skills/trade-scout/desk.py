@@ -7,14 +7,16 @@ checks, trader-risk, the approval record, and one log line per decision in
 `trades-log.md`. The agent keeps the judgment (reading the news) and the Alpaca calls.
 
 Usage (from the project root):
-    python desk.py lock --owner "scan 10:12"     # exit 0: acquired, 3: another run holds it
+    python desk.py lock --owner "scan 10:12"     # exit 0: acquired, prints "token <T>";
+                                                 # 3: another run holds it
     python desk.py candidates                    # newest scout run: what is tradable, as JSON
     python desk.py research MOD PDD              # news, earnings, Congress, in parallel
     python desk.py arm MOD --ask 141.40 --research CAUTION --note "+13% move, no news found"
                                                  # exit 0: prints the place_stock_order JSON
     python desk.py record MOD --status placed --order-id ID1,ID2 --qty 2 --price 141.38
     python desk.py log NONE - - - "0 HIGH, no PICK; 17 rejected, mostly failed breakouts."
-    python desk.py unlock
+    python desk.py unlock --token <T>            # releases only the lock this run took
+    python desk.py unlock --force                # by hand only: removes whatever lock is there
 
 Nothing here talks to a broker or places an order: `arm` prints the order, the agent
 places it with Alpaca's tool, and `record` writes down what came back.
@@ -42,6 +44,7 @@ PENDING = Path("trader/state/desk-pending.json")
 SCOUT_DIR = Path("trader/scout")
 STALE_MIN = 45  # a run that died without unlocking stops blocking after this long
 MAX_CHASE = 0.01  # the ask may be at most 1 % over the planned entry
+PENDING_CUTOFF = dt.time(11, 0)  # no new buy-stop entries from 11:00 (the expire step's time)
 ACTIONS = ("BUY", "SKIP", "ATTEMPT", "EXIT", "CLOSE", "NONE", "HALT")
 VERDICTS = ("CLEAR", "CAUTION", "DOWNGRADE")
 TIER_ORDER = {"HIGH": 0, "PICK": 1, "WATCH": 2}
@@ -106,8 +109,10 @@ def log_line(
 
 def acquire(
     owner: str, path: Path = LOCK, now: dt.datetime | None = None, stale_min: int = STALE_MIN
-) -> tuple[bool, str]:
-    """Take the run lock. Returns (acquired, message). A lock older than stale_min is stale."""
+) -> tuple[bool, str, str | None]:
+    """Take the run lock. Returns (acquired, message, token). A lock older than stale_min is
+    stale. The token names this run's lock, so a stale run's late unlock cannot remove the
+    lock a newer run took over."""
     now = now or now_ny()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -115,20 +120,33 @@ def acquire(
         age = (now - held).total_seconds() / 60
         holder = path.read_text(encoding="utf-8").strip() or "unknown"
         if age < stale_min:
-            return False, f"another desk run holds the lock ({holder}, {age:.0f} min old)"
+            return False, f"another desk run holds the lock ({holder}, {age:.0f} min old)", None
         path.unlink()  # stale: its run died without unlocking
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        return False, "another desk run took the lock a moment ago"
+        return False, "another desk run took the lock a moment ago", None
+    token = f"{now:%Y%m%dT%H%M%S}-{os.getpid()}"
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(f"{owner} since {now:%H:%M} ET, pid {os.getpid()}\n")
+        fh.write(f"{owner} since {now:%H:%M} ET, pid {os.getpid()}, token {token}\n")
     os.utime(path, (now.timestamp(), now.timestamp()))
-    return True, f"lock taken by {owner}"
+    return True, f"lock taken by {owner}", token
 
 
-def release(path: Path = LOCK) -> None:
+def release(path: Path = LOCK, token: str | None = None) -> bool:
+    """Remove the lock if it is this run's (its token matches); token None forces it.
+    Another run's lock is left in place with a warning. Returns whether it was removed."""
+    if not path.exists():
+        return True
+    line = path.read_text(encoding="utf-8").strip()
+    if token is not None and line.partition(" token ")[2].strip() != token:
+        print(
+            f"WARNING: the lock is not this run's, left in place (held by: {line or 'unknown'})",
+            file=sys.stderr,
+        )
+        return False
     path.unlink(missing_ok=True)
+    return True
 
 
 # --------------------------------------------------------------------------- candidates
@@ -456,6 +474,8 @@ def arm(
         log_line("SKIP", sym, "-", f"~{entry}", f"{why}; {describe(c, verdict, note)}", log, now)
         return code, None
 
+    if (c.get("order") or {}).get("type") == "stop" and now.time() >= PENDING_CUTOFF:
+        return skip(f"Buy-stop plan after the {PENDING_CUTOFF:%H:%M} cutoff")
     if verdict == "DOWNGRADE":
         return skip("Research DOWNGRADE")
     if c["tier"] == "WATCH" and verdict != "CLEAR":
@@ -654,8 +674,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("lock", help="take the run lock (exit 3 if another run holds it)")
     p.add_argument("--owner", default="desk")
     p.add_argument("--path", type=Path, default=LOCK)
-    p = sub.add_parser("unlock", help="release the run lock")
+    p = sub.add_parser("unlock", help="release the run lock this run took")
     p.add_argument("--path", type=Path, default=LOCK)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--token", help="the token `lock` printed: removes only that lock")
+    g.add_argument("--force", action="store_true", help="by hand only: remove any lock")
     p = sub.add_parser("candidates", help="the newest scout run's tradable trades, as JSON")
     p.add_argument("--summary", type=Path, help="a summary.json (default: the newest run)")
     p = sub.add_parser("shortlist", help="before the open: the names to watch at the open")
@@ -794,11 +817,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
     if a.cmd == "lock":
-        ok, msg = acquire(a.owner, path=a.path)
+        ok, msg, token = acquire(a.owner, path=a.path)
         print(msg)
+        if ok:
+            print(f"token {token}")
         return 0 if ok else BUSY
-    release(a.path)
-    print("lock released")
+    if release(a.path, None if a.force else a.token):
+        print("lock released")
     return 0
 
 

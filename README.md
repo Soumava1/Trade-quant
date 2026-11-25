@@ -115,7 +115,7 @@ scan.
 
 | New York time | mode | what happens |
 | --- | --- | --- |
-| about 4:45 PM the day before | nightly | `desk.py shortlist --next-day` on the day's close, then `trade-backtest` replays each name's last ~60 sessions with the desk's trade and drops the losers |
+| about 4:45 PM the day before | nightly | `desk.py shortlist --next-day` on the day's close, then `trade-backtest` replays each name's last ~60 sessions with the desk's trade and drops the losers; then `optimize.py review --apply` replays the day's rejects by gate and moves at most one gate one step (bounded, logged in `trader/scout-log.md`) |
 | about 9:05 | premarket | Alpaca's movers are added to the shortlist and backtested; every name is researched before the open |
 | 9:45 to 10:45, every 5 min | scan | the shortlist in one to two minutes with `scout.py --pending`: breakouts as market brackets, names within 3 % of their range high as **buy-stop** brackets that fill only on the breakout |
 | about 11:00 | expire, then a full scan | unfilled buy-stops are cancelled; the whole universe is scanned for movers the shortlist missed |
@@ -220,6 +220,7 @@ fills (slippage at the open) will be worse than the replays.
 .claude/skills/trader-*      the 11 Day Trader skills (vendored, MIT, see LICENSE-day-trader-skill)
 .claude/skills/trade-scout/  scout.py (pipeline), features.py (stocks in play), journal.py (KPIs), SKILL.md
 .claude/skills/trade-backtest/  backtest.py: the desk's trade (T1/T2, stop floor) on each name's last ~60 sessions
+.claude/skills/trade-scout/optimize.py  trader/scout-log.md (rules and rejects of every run) and the nightly gate tuning
 .claude/agents/trade-scout.md
 .claude/agents/trade-research.md  news, earnings (SEC XBRL) and Congress trades in parallel; CLEAR / CAUTION / DOWNGRADE per scout pick
 .claude/agents/trade-desk.md      automatic PAPER desk: scout, research, risk, Alpaca bracket orders, flatten, trades-log.md

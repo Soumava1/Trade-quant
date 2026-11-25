@@ -77,6 +77,7 @@ def session_trade(
     entry_from: str = "09:45",
     entry_until: str = "15:30",
     flat_by: str = "15:55",
+    max_chase: float = MAX_CHASE,
 ) -> dict[str, Any] | None:
     """One session's trade, or None if the buy-stop never filled (or would have chased)."""
     or_end = OPEN + or_minutes
@@ -99,7 +100,7 @@ def session_trade(
         return None
     fb = bars[fill_i]
     fill = max(trigger, fb[1])
-    if fill > trigger * (1 + MAX_CHASE):
+    if fill > trigger * (1 + max_chase):
         return None
     stop = math.floor(min(or_low, fill - min_stop_atr * atr) * 100) / 100
     r = fill - stop

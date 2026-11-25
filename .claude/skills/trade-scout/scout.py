@@ -35,6 +35,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import random
 import shutil
 import subprocess  # noqa: S404 - runs the sibling trader-* scripts only
 import sys
@@ -71,8 +72,11 @@ REJECT = "REJECT"
 TIER_ORDER = {HIGH: 0, PICK: 1, WATCH: 2, REJECT: 3}
 
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(SKILLS / "trade-backtest"))
 import features  # noqa: E402,I001
 import journal  # noqa: E402
+import backtest  # noqa: E402
+import optimize  # noqa: E402
 
 
 # --------------------------------------------------------------------------- running tools
@@ -219,6 +223,98 @@ def news_flags(items: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     return vetoes, cautions
 
 
+def two_step(
+    chart: dict[str, Any],
+    plan: dict[str, Any],
+    r2: float,
+    replays: int,
+    seed: int,
+    until: str = "15:55",
+    or_minutes: int = 5,
+    min_stop_atr: float = 0.25,
+    window: int = 2,
+) -> dict[str, Any] | None:
+    """The desk's real exit, scored the way the Time Machine scores a single target.
+
+    The desk sells half at +1R, moves the rest's stop to the entry and sells it at +r2 R,
+    all out by the flat-by time. trader-timemachine knows one target only, so this replays
+    the same kind of pool (each past full session's bars as ratios to the previous close,
+    the slot drawn within +/- `window` bars) with that exit, and runs the same exit on the
+    real past sessions (trade-backtest's session_trade). Ties inside a bar go against it.
+    """
+    days = features.sessions(chart)
+    date, k = str(plan.get("date") or ""), plan.get("entry_bar")
+    entry, stop = float(plan["entry"]), float(plan["stop"])
+    risk = entry - stop
+    if k is None or risk <= 0:
+        return None
+    full = [days[d] for d in sorted(days) if d < date and len(days[d]) == 78]
+    if len(full) < 20:
+        return None
+    pool: list[list[tuple[float, float, float]]] = [[] for _ in range(78)]
+    for bars in full:
+        for i in range(1, 78):
+            pc = bars[i - 1][4]
+            pool[i].append((bars[i][2] / pc, bars[i][3] / pc, bars[i][4] / pc))
+    hh, mm = (int(x) for x in until.split(":"))
+    last = min(77, (hh * 60 + mm - (9 * 60 + 30)) // 5 - 1)
+    t1, t2 = entry + risk, entry + r2 * risk
+    rng = random.Random(seed)  # noqa: S311 - a replay seed, not security
+    n_t1 = n_stop = n_t2 = 0
+    rs, wins = [], []
+    for _ in range(replays):
+        p, cur, h1, h2 = entry, stop, None, None
+        for i in range(int(k) + 1, last + 1):
+            j = i if window == 0 else min(77, max(1, i + rng.randint(-window, window)))
+            hx, lx, cx = rng.choice(pool[j])
+            hi, lo = p * hx, p * lx
+            if h2 is None:
+                if lo <= cur:  # the stop first: the worst reading of the bar
+                    out = (cur - entry) / risk
+                    h1 = out if h1 is None else h1
+                    h2 = out
+                elif h1 is None and hi >= t1:
+                    h1, cur = 1.0, entry
+                if h2 is None and h1 is not None and hi >= t2:
+                    h2 = r2
+            p *= cx
+        close_r = (p - entry) / risk
+        h1 = close_r if h1 is None else h1
+        h2 = close_r if h2 is None else h2
+        rs.append(0.5 * h1 + 0.5 * h2)
+        if h1 == 1.0:
+            n_t1 += 1
+            wins.append(rs[-1])
+            n_t2 += h2 == r2
+        elif h1 <= -0.999:
+            n_stop += 1
+    mc = {
+        "p_target": round(n_t1 / replays, 4),
+        "p_stop": round(n_stop / replays, 4),
+        "p_neither": round(1 - (n_t1 + n_stop) / replays, 4),
+        "p_t2": round(n_t2 / replays, 4),
+        "avg_R": round(sum(rs) / len(rs), 3),
+        "win_r": round(sum(wins) / len(wins), 3) if wins else 1.0,
+    }
+    hist_rs = []
+    for d in sorted(days):
+        atr = backtest.atr_before(days, d) if d < date else None
+        t = backtest.session_trade(days[d], atr, r2, or_minutes, min_stop_atr) if atr else None
+        if t:
+            hist_rs.append(t["r"])
+    history = {
+        "triggered": len(hist_rs),
+        "target": sum(1 for x in hist_rs if x > 0),
+        "stop": sum(1 for x in hist_rs if x <= 0),
+        "avg_R": round(sum(hist_rs) / len(hist_rs), 3) if hist_rs else 0.0,
+    }
+    verdict = (
+        f"T1/T2 plan: +1R first in {mc['p_target']:.1%} of replays, the stop first in "
+        f"{mc['p_stop']:.1%}, T2 ({r2:g}R) in {mc['p_t2']:.1%}; avg R {mc['avg_R']:+.3f}"
+    )
+    return {"mc": mc, "history": history, "verdict": verdict, "t2_r": r2}
+
+
 def score_candidate(c: Candidate, th: Thresholds) -> None:
     """Fill metrics, score (0-100), tier and the reasons, from the tool outputs already on c.
 
@@ -235,10 +331,13 @@ def score_candidate(c: Candidate, th: Thresholds) -> None:
     """
     if c.plan is None or c.tm is None or c.entry is None:
         raise ValueError("score_candidate needs the entry, the plan and the Time Machine run")
-    mc = c.tm.get("mc") or {}
-    hist = c.tm.get("history") or {}
+    # The T1/T2 plan when two_step() ran: "target" is +1R first, and break-even uses the
+    # average R of the replays that got there, since a win pays more than 1R on average.
+    ts = c.tm.get("two_step") or {}
+    mc = ts.get("mc") or c.tm.get("mc") or {}
+    hist = ts.get("history") or c.tm.get("history") or {}
     r = float(c.plan.get("target_r") or 1.0)
-    breakeven = 1.0 / (1.0 + r)
+    breakeven = 1.0 / (1.0 + float(mc.get("win_r") or r))
     p_t, p_s = float(mc.get("p_target", 0)), float(mc.get("p_stop", 0))
     decided = p_t + p_s
     win_share = p_t / decided if decided else 0.0
@@ -658,6 +757,7 @@ def step_candidate(opts: Options, c: Candidate) -> None:
     if tm_off is None or not tm_off.exists():
         c.stop_here(f"time machine: no 60-day bars for {c.symbol}")
         return
+    chart = features.load_chart(tm_off)
     tried: list[dict[str, Any]] = []
     errors: list[str] = []
     combos = [
@@ -689,7 +789,28 @@ def step_candidate(opts: Options, c: Candidate) -> None:
         if not isinstance(res.data, dict) or "mc" not in res.data:
             errors.append(f"{stop_name}/{target}: time machine: {res.text or 'no result'}")
             continue
-        avg_r = float(res.data["mc"].get("avg_R", 0.0))
+        tm_doc = res.data
+        # The desk exits in two steps (T1 at +1R, the rest at this target): score that.
+        r2 = float(plan.get("target_r") or 0)
+        msa = float(stop_name.split(":")[1]) if stop_name.startswith("orl-atr:") else 0.0
+        ts = (
+            two_step(
+                chart,
+                plan,
+                r2,
+                opts.replays,
+                opts.seed,
+                str(plan.get("flat_by") or "15:55"),
+                opts.or_minutes,
+                msa,
+            )
+            if r2 > 1
+            else None
+        )
+        if ts:
+            tm_doc = {**tm_doc, "two_step": ts, "verdict": ts["verdict"]}
+        avg_r = float((ts or tm_doc)["mc"].get("avg_R", 0.0))
+        res.data = tm_doc
         tried.append(
             {
                 "target": f"{stop_name} / {target}",
@@ -710,8 +831,8 @@ def step_candidate(opts: Options, c: Candidate) -> None:
         {
             "target": t["target"],
             "avg_R": round(t["avg_R"], 3),
-            "p_target": t["tm"]["mc"].get("p_target"),
-            "p_stop": t["tm"]["mc"].get("p_stop"),
+            "p_target": (t["tm"].get("two_step") or t["tm"])["mc"].get("p_target"),
+            "p_stop": (t["tm"].get("two_step") or t["tm"])["mc"].get("p_stop"),
             "verdict": t["tm"].get("verdict"),
         }
         for t in tried
@@ -821,6 +942,7 @@ def run(opts: Options) -> dict[str, Any]:
             "max_chase_pct": opts.th.max_chase_pct,
             "entry_pool": opts.entry_pool,
             "or_minutes": opts.or_minutes,
+            "max_pending_pct": opts.max_pending_pct,
             "daily_pick": opts.daily_pick,
             "thresholds": vars(opts.th),
             "position_caps": [list(r) for r in opts.caps],
@@ -1076,9 +1198,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--no-late-entry", action="store_true", help="only fresh triggers")
     ap.add_argument("--entry-pool", type=int, default=40, help="scan hits given an entry check")
-    ap.add_argument("--min-edge", type=float, default=0.05, help="edge over break-even")
+    ap.add_argument("--min-edge", type=float, help="edge over break-even (0.05)")
     ap.add_argument("--min-history", type=int, default=10, help="past sessions it must fire")
-    ap.add_argument("--min-score", type=float, default=55.0)
+    ap.add_argument("--min-score", type=float, help="minimum score for HIGH (55)")
     ap.add_argument(
         "--position-caps",
         help="score:max-position-%% rows, e.g. 95:75,85:55,75:35,65:20,0:10",
@@ -1098,9 +1220,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="also plan names that have not broken out yet, as buy-stops at the range high "
         "(needs --symbols or --watchlist)",
     )
-    ap.add_argument(
-        "--max-pending-pct", type=float, default=3.0, help="--pending: within this %% (3)"
-    )
+    ap.add_argument("--max-pending-pct", type=float, help="--pending: within this %% (3)")
     ap.add_argument("--json", action="store_true", help="print the summary as JSON")
     return ap
 
@@ -1146,9 +1266,9 @@ def main(argv: list[str] | None = None) -> int:
         news_hours=a.news_hours,
         th=Thresholds(
             a.max_trigger_age,
-            a.min_edge,
+            a.min_edge if a.min_edge is not None else float(sc.get("min_edge", 0.05)),
             a.min_history,
-            a.min_score,
+            a.min_score if a.min_score is not None else float(sc.get("min_score", 55.0)),
             late_entry=not a.no_late_entry and bool(sc.get("late_entry", True)),
             max_chase_pct=a.max_chase_pct
             if a.max_chase_pct is not None
@@ -1163,7 +1283,9 @@ def main(argv: list[str] | None = None) -> int:
         daily_pick=not a.no_pick and bool(sc.get("daily_pick", True)),
         caps=parse_caps(caps) if caps else DEFAULT_CAPS,
         pending=a.pending,
-        max_pending_pct=a.max_pending_pct,
+        max_pending_pct=a.max_pending_pct
+        if a.max_pending_pct is not None
+        else float(sc.get("max_pending_pct", 3.0)),
     )
     if a.pending and not (a.symbols or a.watchlist):
         print("trade-scout: --pending needs --symbols or --watchlist", file=sys.stderr)
@@ -1200,6 +1322,10 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     report = render(summary)
     (run_dir / "summary.md").write_text(report)
+    try:  # the running log of rules and rejects; never fails the run
+        optimize.append_log(trader_dir / "scout-log.md", summary, run_dir.name)
+    except Exception as e:  # noqa: BLE001
+        print(f"trade-scout: scout-log.md not written: {e}", file=sys.stderr)
     print(json.dumps(summary, indent=2) if a.json else report)
     if not summary.get("ok"):
         return 2

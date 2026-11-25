@@ -34,13 +34,17 @@ Be quick: a breakout plan goes stale within a few minutes.
 
 `D lock --owner "<mode> HH:MM"`. Exit 3 means another desk run is still
 going: `D log NONE - - - "Skipped: <its message>"` and stop without
-unlocking. Otherwise, whatever happens later (HALT, error, nothing to trade),
-end the run with `D unlock`.
+unlocking. On exit 0 it prints `token <T>`: keep that token. Whatever happens
+later (HALT, error, nothing to trade), end the run with
+`D unlock --token <T>`, which removes only this run's lock: if a run that
+outlived the stale limit unlocks late, the newer run's lock stays. Never use
+`D unlock --force` (that is for a person clearing a dead lock by hand).
+Below, "unlock" always means `D unlock --token <T>`.
 
 ## 0b. Paper guard
 
-All three must hold, or place NOTHING, `D log HALT - - - "<reason>"`, unlock
-and stop:
+All three must hold, or place NOTHING, `D log HALT - - - "<reason>"`,
+`D unlock --token <T>` and stop:
 
 1. `trader/config.json` has `"paper": true`.
 2. `.mcp.json` sets `ALPACA_PAPER_TRADE` to `"true"`.
@@ -79,7 +83,7 @@ lower conviction; your research note must say plainly when the story is thin.
    in step 3 of `.claude/agents/trade-research.md`. Open links only where a
    headline could change the verdict.
 6. `D log NONE - - - "Premarket: shortlist of N (M added movers, K dropped by the backtest); X CLEAR, Y CAUTION, Z DOWNGRADE."`,
-   unlock, report the shortlist and the DOWNGRADEs.
+   `D unlock --token <T>`, report the shortlist and the DOWNGRADEs.
 
 ## Mode "nightly" (about 4:45 PM, after the close; places nothing)
 
@@ -91,8 +95,14 @@ lower conviction; your research note must say plainly when the story is thin.
    stop at the range low but at least 0.25x ATR, half at +1R then breakeven,
    half at the best of 2R/3R/4R, out at 15:55). Losers are dropped, the rest
    ranked best first, thin samples kept last.
-4. `D log NONE - - - "Nightly: shortlist of N for <date>; K dropped by the backtest (<tickers>); best <ticker> <avg R>."`,
-   unlock, and report the top ten with their backtest numbers.
+4. `python .claude/skills/trade-scout/optimize.py review --apply`: replays
+   today's rejected names with the desk's trade, grouped by the gate that
+   stopped them, and moves at most ONE gate one step inside fixed bounds
+   (loosen a gate whose rejects would have made money over the last 10
+   days; tighten back one whose rejects lose; raise min_score if the names
+   that passed lose). Results and any change go to `trader/scout-log.md`.
+5. `D log NONE - - - "Nightly: shortlist of N for <date>; K dropped by the backtest (<tickers>); best <ticker> <avg R>; tuning: <the change, naming the gate and its old and new value, or none>."`,
+   `D unlock --token <T>`, and report the top ten with their backtest numbers and the tuning.
 
 ## Mode "scan" (default)
 
@@ -114,9 +124,9 @@ lower conviction; your research note must say plainly when the story is thin.
    `python .claude/skills/trade-scout/scout.py --no-journal` (the whole
    universe, 5 to 10 minutes). The cloud owns the journal. Exit 2 means it
    could not run (closed market, range still forming):
-   `D log NONE - - - "<its one-line reason>"`, unlock, stop.
+   `D log NONE - - - "<its one-line reason>"`, `D unlock --token <T>`, stop.
 3. `D candidates`. If `candidates` is empty, `D log NONE - - - "<none_reason>"`,
-   unlock, stop. The list is already in order: HIGH, then the PICK, then
+   `D unlock --token <T>`, stop. The list is already in order: HIGH, then the PICK, then
    sized WATCH.
 4. **Research**. A candidate with a `verdict_today` was researched this
    morning: reuse it unless one of its `news` headlines is new since then.
@@ -131,7 +141,9 @@ lower conviction; your research note must say plainly when the story is thin.
    b. `D arm SYM --ask ASK --research VERDICT --note "<the facts, short>"`.
       It checks the price (at most 1 % over the plan's entry, above the
       stop), WATCH-needs-CLEAR, DOWNGRADE, already-traded-today and
-      trader-risk, records the approval, and logs `SKIP` or `ATTEMPT`.
+      trader-risk, records the approval, and logs `SKIP` or `ATTEMPT`. From
+      11:00 on it also skips any buy-stop (`entry_type` "stop") plan: the
+      morning buy-stops expire then, and a new one must not replace them.
       Exit 1: skipped, go on to the next. Exit 4: a daily or monthly limit is
       hit, place nothing more this run. Exit 0: it printed the orders, a
       list: two brackets (half the shares to T1 at +1R, the rest to T2),
@@ -145,7 +157,7 @@ lower conviction; your research note must say plainly when the story is thin.
       `--status failed --note "<what came back>"` and do not send the second.
       If only the second failed, record the first id alone (the log says
       one bracket is missing). Never retry a failed order this run.
-6. Unlock, and report what was managed, placed and skipped, with the log
+6. `D unlock --token <T>`, and report what was managed, placed and skipped, with the log
    lines.
 
 ## Mode "manage" (first in every scan, and on its own in the afternoon)
@@ -173,7 +185,7 @@ goes up to the entry, so the rest of the trade can no longer lose.
    Log each EXIT once: skip one whose leg was already recorded by `D fill`
    on an earlier run.
 4. Change nothing else: never move a stop down, never touch a take-profit,
-   never touch an order the desk did not place. Unlock if you locked.
+   never touch an order the desk did not place. `D unlock --token <T>` if you locked.
 
 ## Mode "expire" (about 11:00)
 
@@ -185,7 +197,7 @@ Buy-stops planned in the morning should not fill in the afternoon.
    are two, one per bracket, in `D trades`): `cancel_order_by_id` each entry
    (its legs go with it), then
    `D log SKIP SYM - - "Buy-stop expired unfilled at 11:00: the breakout never came."`
-3. Leave filled positions and everything the desk did not place. Unlock.
+3. Leave filled positions and everything the desk did not place. `D unlock --token <T>`.
 
 ## Mode "flatten" (about 3:40 PM; flat by 15:55 is a hard rule)
 
@@ -209,7 +221,7 @@ Buy-stops planned in the morning should not fill in the afternoon.
      step 3; `D log EXIT S Q P "..."` only for a leg no earlier run logged.
 5. A position NOT bought by the desk today is not yours: leave it, log
    nothing, mention it in the report.
-6. Never call `close_all_positions` or `cancel_all_orders`. Unlock.
+6. Never call `close_all_positions` or `cancel_all_orders`. `D unlock --token <T>`.
 
 ## Never
 
