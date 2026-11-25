@@ -696,8 +696,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--qty", required=True)
     p.add_argument("--price", required=True)
     p.add_argument("--order-id", required=True, help="the Alpaca id of the leg that filled")
-    p = sub.add_parser("breakeven", help="mark a trade's stop as moved to breakeven")
+    p = sub.add_parser(
+        "breakeven", help="mark a trade's stop as moved to breakeven and log the T1 EXIT"
+    )
     p.add_argument("symbol", type=str.upper)
+    p.add_argument("--price", help="the T1 fill price (default: the planned T1)")
     p = sub.add_parser("verdict", help="keep today's research verdict for a ticker")
     p.add_argument("symbol", type=str.upper)
     p.add_argument("verdict", choices=VERDICTS, type=str.upper)
@@ -779,8 +782,20 @@ def main(argv: list[str] | None = None) -> int:
         if not t:
             print(f"No desk trade in {a.symbol} today.", file=sys.stderr)
             return 2
+        if t.get("breakeven"):
+            print(f"{a.symbol}: already at breakeven; nothing logged again.")
+            return 0
         save_trade(t | {"breakeven": True})
-        print(f"{a.symbol}: stop on the T2 half marked as moved to breakeven ${t['entry']}.")
+        # Logged here, not by the agent: a shell would eat "$27.10" in its quoted reason.
+        print(
+            log_line(
+                "EXIT",
+                a.symbol,
+                str((t.get("legs") or ["-"])[0]),
+                a.price or str(t["t1"]),
+                f"T1 hit: +1R on half; the rest's stop moved to breakeven ${float(t['entry']):.2f}",
+            )
+        )
         return 0
     if a.cmd == "verdict":
         print(json.dumps({a.symbol: save_verdict(a.symbol, a.verdict, a.note)}))

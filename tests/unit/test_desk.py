@@ -329,3 +329,16 @@ def test_cli_lock_exit_codes(tmp_path):
     assert desk.main(["unlock", "--path", str(lock), "--force"]) == 0 and not lock.exists()
     with pytest.raises(SystemExit):
         desk.main(["unlock", "--path", str(lock)])  # --token or --force is required
+
+
+def test_breakeven_logs_the_t1_exit_once_with_the_dollar_sign_intact(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    trade = {"symbol": "BAX", "entry": 27.1, "stop": 26.7, "t1": "27.50", "t2": "28.30"}
+    desk.save_trade(trade | {"legs": ["4", "5"], "order_ids": ["a", "b"], "breakeven": False})
+    assert desk.main(["breakeven", "BAX", "--price", "27.50"]) == 0
+    assert desk.main(["breakeven", "BAX", "--price", "27.50"]) == 0  # second run: no new line
+    lines = [x for x in (tmp_path / "trades-log.md").read_text(encoding="utf-8").splitlines()]
+    exits = [x for x in lines if "| EXIT |" in x]
+    assert len(exits) == 1 and "| BAX | EXIT | 4 sh | $27.50 |" in exits[0]
+    assert "moved to breakeven $27.10." in exits[0]
+    assert desk.load_trades()["BAX"]["breakeven"] is True

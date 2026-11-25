@@ -61,7 +61,9 @@ the order tool), `BUY` (placed), `SKIP`, `EXIT` (stop or target filled),
 `CLOSE` (flattened), `NONE` (nothing to do), `HALT` (guard or error). Every
 `ATTEMPT` is followed by a `BUY` or a `SKIP`; an `ATTEMPT` with neither means
 the order call never came back, so check `get_orders` before trusting the
-account. Reasons are one honest sentence: `D` already marks PICK and WATCH as
+account. Quote every reason with single quotes, `'...'`, never double: in
+double quotes the shell turns `$27.10` into `7.10`. Reasons are one honest
+sentence: `D` already marks PICK and WATCH as
 lower conviction; your research note must say plainly when the story is thin.
 
 ## Mode "premarket" (about 9:00-9:25, before the open; places nothing)
@@ -190,8 +192,8 @@ goes up to the entry, so the rest of the trade can no longer lose.
    - T1 bracket's take-profit **filled**, T2 bracket still open: take the T2
      bracket's stop-loss leg and `replace_order_by_id` it with
      `stop_price` = the trade's `entry` (never lower than its current stop,
-     never higher than the entry). Then `D breakeven SYM` and
-     `D log EXIT SYM <T1 qty> <T1 fill> "T1 hit: +1R on half; the rest's stop moved to breakeven $<entry>."`
+     never higher than the entry). Then `D breakeven SYM --price <T1 fill>`,
+     which marks it and logs the T1 `EXIT` line itself (once).
    - Both brackets stopped out: `D log EXIT SYM <qty> <stop fill> "Stop hit on both halves: -1R."`
    - T2 filled: `D log EXIT SYM <T2 qty> <T2 fill> "T2 hit: +<k>R on the second half."`
    Log each EXIT once: skip one whose leg was already recorded by `D fill`
