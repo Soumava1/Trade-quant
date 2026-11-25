@@ -188,13 +188,33 @@ from your environment. On your own computer:
   desk only ever raises a stop to the entry; it never lowers one.
 - **Ask every time:** cancelling or closing an order (the desk's expire and
   flatten steps ask).
-- **Blocked:** options, crypto, and "close or cancel everything".
+- **Blocked:** options and "close or cancel everything". Crypto orders go through
+  `place_stock_order` (Alpaca takes pairs like `SOL/USD` there) and only from the
+  crypto desk below.
 - **Allowed without asking:** read-only lookups (account, positions, orders,
   quotes).
 
 Never point `.mcp.json` at a live account while `place_stock_order` is on
 `allow`: move it back to `ask` first. Cloud sessions cannot reach Alpaca, so
 only the scheduled tasks on your own computer place paper orders.
+
+## Crypto desk (paper)
+
+`.claude/agents/crypto-desk.md` runs every 4 hours, around the clock, on its own $5,000
+budget (`crypto` in `trader/config.json`). The rule, in `.claude/skills/crypto-desk/crypto.py`:
+
+- **Entry:** a 1-hour close above the prior 24-hour high, the price above its 72-hour EMA,
+  bought at most 1 % past that level, only if the spread is under 0.3 %.
+- **Risk:** 0.75 % of the budget ($37.50) at the stop, which sits 1.5x the 1-hour ATR under
+  the entry and rests on Alpaca as a GTC stop-limit. At most 40 % of the budget in one coin,
+  3 coins at once, $75 lost in a day or $200 in a month and it stops buying.
+- **Exits:** half at +2R with the rest's stop moved to breakeven, the rest at +4R, and
+  everything out 24 hours after the entry. Alpaca has no crypto brackets, so the targets
+  and the 24-hour exit are checked at each run.
+- **Backtest gate:** each day the rule is replayed on each coin's last 90 days of 1-hour
+  bars, with 0.25 % fees each way; only coins where it made money are traded, and a
+  backtest over 48 hours old trades nothing. `"enabled": false` stops new entries.
+- **Coins:** BTC, ETH, SOL, XRP and HYPE (Alpaca lists no ZEC, BNB or TRX).
 
 ## KPIs
 
@@ -221,6 +241,7 @@ fills (slippage at the open) will be worse than the replays.
 .claude/skills/trade-scout/  scout.py (pipeline), features.py (stocks in play), journal.py (KPIs), SKILL.md
 .claude/skills/trade-backtest/  backtest.py: the desk's trade (T1/T2, stop floor) on each name's last ~60 sessions
 .claude/skills/trade-scout/optimize.py  trader/scout-log.md (rules and rejects of every run) and the nightly gate tuning
+.claude/skills/crypto-desk/crypto.py  the paper crypto desk: rule, backtest, sizing, exits
 .claude/agents/trade-scout.md
 .claude/agents/trade-research.md  news, earnings (SEC XBRL) and Congress trades in parallel; CLEAR / CAUTION / DOWNGRADE per scout pick
 .claude/agents/trade-desk.md      automatic PAPER desk: scout, research, risk, Alpaca bracket orders, flatten, trades-log.md
