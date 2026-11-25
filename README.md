@@ -205,16 +205,23 @@ budget (`crypto` in `trader/config.json`). The rule, in `.claude/skills/crypto-d
 
 - **Entry:** a 1-hour close above the prior 24-hour high, the price above its 72-hour EMA,
   bought at most 1 % past that level, only if the spread is under 0.3 %.
-- **Risk:** 0.75 % of the budget ($37.50) at the stop, which sits 1.5x the 1-hour ATR under
-  the entry and rests on Alpaca as a GTC stop-limit. At most 40 % of the budget in one coin,
-  3 coins at once, $75 lost in a day or $200 in a month and it stops buying.
-- **Exits:** half at +2R with the rest's stop moved to breakeven, the rest at +4R, and
-  everything out 24 hours after the entry. Alpaca has no crypto brackets, so the targets
-  and the 24-hour exit are checked at each run.
-- **Backtest gate:** each day the rule is replayed on each coin's last 90 days of 1-hour
-  bars, with 0.25 % fees each way; only coins where it made money are traded, and a
-  backtest over 48 hours old trades nothing. `"enabled": false` stops new entries.
-- **Coins:** BTC, ETH, SOL, XRP and HYPE (Alpaca lists no ZEC, BNB or TRX).
+- **Risk:** 0.5 % of the budget ($25) at the stop, which sits 1.5x the 1-hour ATR under the
+  entry and rests on Alpaca as a GTC stop-limit; half that once the desk is 1.5 % under its
+  peak. **Hard 3 % drawdown cap ($150):** a trade is refused unless the drawdown so far plus
+  every open trade's risk plus its own stays under 2.5 % (a 0.5 % buffer for gaps and fees),
+  so the desk cannot pass 3 % even if every stop is hit. Open risk is capped at 1.5 % in all
+  (coins fall together), at most 40 % of the budget in one coin and 3 coins at once.
+- **Exits:** half at +2R with the rest's stop moved to breakeven, the rest at +4R. At 24
+  hours the rest is sold, unless T1 has paid and the price is still above its trend: then
+  its stop trails 3x ATR under its high, out by 72 hours. Alpaca has no crypto brackets, so
+  targets, the 24-hour decision and the trail are checked at each run.
+- **Backtest gate:** daily, the rule on each coin's last 90 days of 1-hour bars, 0.25 % fees
+  each way. A coin trades only if it made money over all 90 days AND the most recent 45,
+  with 5+ trades and 10+ Alpaca trades an hour (a thin book fills badly). A backtest over 48
+  hours old trades nothing; `"enabled": false` stops new entries.
+- **Coins:** BTC, ETH, SOL, XRP and HYPE, plus Alpaca's other 27 USD pairs (no ZEC, BNB or
+  TRX on Alpaca; stablecoins and PAXG left out). Zero crypto trades is a valid result: in a
+  falling market a long-only rule should sit out.
 
 ## KPIs
 

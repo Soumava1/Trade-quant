@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
-"""The PAPER crypto desk: a 24-hour breakout, more reward for less risk, held at most 24 hours.
+"""The PAPER crypto desk: a 24-hour breakout, more reward for less risk, a hard 3 % drawdown cap.
 
-The rule, on 1-hour bars (Alpaca's public crypto data, no keys needed):
+The rule, on 1-hour bars (Alpaca's public crypto data):
 
   entry   checked every CHECK hours: one of the last CHECK closed bars closed above the high of
           the 24 bars before it, the price is above the 72-hour EMA (the trend), and the price
           now is at most max_chase_pct over that breakout level (never chased further)
-  stop    entry - stop_atr x ATR(14, 1-hour bars), held on Alpaca as a GTC stop-limit sell
+  stop    entry - stop_atr x ATR(14, 1-hour bars), resting on Alpaca as a GTC stop-limit
   T1      at +t1_r R, half is sold and the rest's stop moves to the entry (breakeven)
-  T2      the rest at +t2_r R, or at max_hold_hours after the entry, whichever comes first
-  risk    risk_per_trade_pct of the crypto budget at the stop (half the stock desk's share),
-          at most max_position_pct of the budget in one coin, at most max_open coins at once
+  T2      the rest at +t2_r R. At base_hold_hours (24) the rest is sold, UNLESS T1 has paid
+          and the price is still above its trend: then it is a winner, and its stop trails
+          trail_atr x ATR under its highest price since the entry, out by max_hold_hours (72)
+  risk    risk_per_trade_pct of the crypto budget at the stop, halved once the desk is
+          halve_at_dd_pct under its peak. A new trade is refused unless the drawdown so far,
+          plus the risk still open in every trade, plus this one, stays under
+          max_drawdown_pct - dd_buffer_pct of the budget (the buffer is for gaps and fees):
+          the desk can never be more than max_drawdown_pct (3 %) under its peak, even if every
+          open stop is hit. Coins move together, so open risk is capped as a total too.
 
-Alpaca has no bracket orders for crypto, so only the stop rests on the broker; targets and the
-24-hour exit are checked at each run (every CHECK hours). The backtest models exactly that:
-the stop fills inside a bar (at the stop, or the bar's open if it gaps under), targets and
-the time exit only at a check, at that check's price, with fees on both sides.
+Alpaca has no bracket orders for crypto, so only the stop rests on the broker; targets, the
+24-hour decision and the trail are checked at each run (every CHECK hours). The backtest
+models exactly that, with fees on both sides. A coin is traded only if the rule made money on
+its last 90 days AND on the most recent half of them (an out-of-sample check against luck),
+with enough trades, and enough trading on Alpaca (a thin book fills badly).
 
 Usage (from the project root):
     python crypto.py backtest                 # 90 days per coin -> trader/crypto/backtest.json
@@ -23,11 +30,13 @@ Usage (from the project root):
     python crypto.py arm BTC/USD --ask A --bid B          # every check; prints the buy order
     python crypto.py stop BTC/USD --qty Q                 # the GTC stop-limit for what is held
     python crypto.py opened BTC/USD --qty Q --price P --stop-id ID
-    python crypto.py manage --price BTC/USD=P --held BTC/USD=Q   # what to do with open trades
-    python crypto.py done BTC/USD --event t1|t2|time|stopped --qty Q --price P [--stop-id ID]
+    python crypto.py manage --price BTC/USD=P --held BTC/USD=Q   # what open trades need now
+    python crypto.py trailed BTC/USD --stop S                    # after replacing the stop
+    python crypto.py done BTC/USD --event t1|t2|time|trail|stopped --qty Q --price P
+    python crypto.py status                                      # equity, peak, drawdown
     python crypto.py lock --owner "crypto 04:05" / unlock --token T
 
-Paper only: nothing here talks to a broker; the desk places what `arm` and `stop` print.
+Paper only: nothing here talks to a broker; the desk places what these commands print.
 """
 
 from __future__ import annotations
@@ -37,6 +46,7 @@ import datetime as dt
 import json
 import math
 import os
+import statistics
 import sys
 import time
 import urllib.error
@@ -56,26 +66,32 @@ MAX_BACKTEST_AGE = dt.timedelta(hours=48)  # an older verdict trades nothing
 DEFAULTS: dict[str, Any] = {
     "coins": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "HYPE/USD"],
     "budget": 5000,
-    "risk_per_trade_pct": 0.75,
+    "risk_per_trade_pct": 0.5,
+    "max_drawdown_pct": 3.0,
+    "dd_buffer_pct": 0.5,
+    "halve_at_dd_pct": 1.5,
+    "max_open_risk_pct": 1.5,
     "max_position_pct": 40,
     "max_open": 3,
-    "max_daily_loss_usd": 75,
-    "max_monthly_loss_usd": 200,
     "breakout_hours": 24,
     "trend_ema_hours": 72,
     "atr_hours": 14,
     "stop_atr": 1.5,
     "t1_r": 2.0,
     "t2_r": 4.0,
-    "max_hold_hours": 24,
+    "base_hold_hours": 24,
+    "max_hold_hours": 72,
+    "trail_atr": 3.0,
     "check_hours": 4,
     "max_chase_pct": 1.0,
     "max_spread_pct": 0.3,
     "fee_pct": 0.25,
     "backtest_days": 90,
     "min_trades": 5,
+    "min_bar_trades": 10,
 }
-Bar = tuple[int, float, float, float, float]  # (unix seconds, open, high, low, close)
+# (unix seconds, open, high, low, close[, trades in the bar])
+Bar = tuple
 
 
 def settings(cfg_path: Path = Path("trader/config.json")) -> dict[str, Any]:
@@ -123,7 +139,8 @@ def fetch_bars(symbol: str, days: int, now: dt.datetime | None = None) -> list[B
         doc = _get(f"{DATA}?{urllib.parse.urlencode(q)}")
         for b in (doc.get("bars") or {}).get(symbol, []):
             t = int(dt.datetime.fromisoformat(b["t"].replace("Z", "+00:00")).timestamp())
-            bars.append((t, float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"])))
+            px = (float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"]))
+            bars.append((t, *px, int(b.get("n") or 0)))
         token = doc.get("next_page_token")
         if not token:
             break
@@ -144,11 +161,16 @@ def ema(xs: list[float], n: int) -> list[float]:
 
 def atr(bars: list[Bar], n: int) -> list[float]:
     out, prev = [], None
-    for _, _, h, lo, c in bars:
+    for b in bars:
+        h, lo, c = b[2], b[3], b[4]
         tr = h - lo if prev is None else max(h - lo, abs(h - prev), abs(lo - prev))
         out.append(tr if not out else out[-1] + (tr - out[-1]) / n)
         prev = c
     return out
+
+
+def indicators(bars: list[Bar], s: dict[str, Any]) -> tuple[list[float], list[float]]:
+    return ema([b[4] for b in bars], int(s["trend_ema_hours"])), atr(bars, int(s["atr_hours"]))
 
 
 def signal_at(bars: list[Bar], i: int, s: dict[str, Any], ema_v: list[float], atr_v: list[float]):
@@ -171,30 +193,53 @@ def signal_at(bars: list[Bar], i: int, s: dict[str, Any], ema_v: list[float], at
     return {"entry": price, "stop": stop, "level": level}
 
 
-def trade_from(bars: list[Bar], i: int, plan: dict[str, Any], s: dict[str, Any]) -> dict:
+def trail_stop(high_since: float, atr_now: float, cur: float, s: dict[str, Any]) -> float:
+    """The trailing stop: trail_atr x ATR under the highest price since the entry; never lower."""
+    return max(cur, high_since - s["trail_atr"] * atr_now)
+
+
+def trade_from(
+    bars: list[Bar],
+    i: int,
+    plan: dict[str, Any],
+    s: dict[str, Any],
+    ema_v: list[float],
+    atr_v: list[float],
+) -> dict:
     """The trade entered at bar i's close, managed bar by bar; R net of fees."""
     entry, stop = plan["entry"], plan["stop"]
     r = entry - stop
     t1, t2 = entry + s["t1_r"] * r, entry + s["t2_r"] * r
-    k, hold = int(s["check_hours"]), int(s["max_hold_hours"])
-    cur, h1, h2, how = stop, None, None, "open"
+    k, base, cap = int(s["check_hours"]), int(s["base_hold_hours"]), int(s["max_hold_hours"])
+    cur, h1, h2, how, trailing, high = stop, None, None, "open", False, entry
     for j in range(i + 1, len(bars)):
-        _, o, _, lo, c = bars[j]
+        o, hi, lo, c = bars[j][1], bars[j][2], bars[j][3], bars[j][4]
         if lo <= cur:  # the resting stop: at the stop, or the open on a gap under it
             px = min(cur, o)
             out = (px - entry) / r
             h1 = out if h1 is None else h1
-            h2, how = out, "stop" if h1 < 0 else "T1 then breakeven" if h1 > 0 else "breakeven"
+            h2 = out
+            how = "trail stop" if trailing else "stop" if h1 < 0 else "T1 then breakeven"
             break
-        if (j - i) % k == 0:  # a check: targets and the time exit at this price
-            age = j - i
-            if h1 is None and c >= t1:
-                h1, cur = s["t1_r"] if c < t2 else (c - entry) / r, entry
-            if c >= t2 or age >= hold:
+        high = max(high, hi)
+        if (j - i) % k:
+            continue
+        age = j - i  # a check: targets, the 24-hour decision and the trail, at this price
+        if h1 is None and c >= t1:
+            h1, cur = (s["t1_r"] if c < t2 else (c - entry) / r), entry
+        if c >= t2 or age >= cap:
+            out = (c - entry) / r
+            h1 = out if h1 is None else h1
+            h2, how = out, "T2" if c >= t2 else f"{cap}h exit"
+            break
+        if age >= base:
+            if h1 is not None and h1 > 0 and c > ema_v[j]:  # a winner: let it run on a trail
+                trailing = True
+                cur = trail_stop(high, atr_v[j], cur, s)
+            else:
                 out = (c - entry) / r
                 h1 = out if h1 is None else h1
-                h2 = out
-                how = "T2" if c >= t2 else "24h exit"
+                h2, how = out, f"{base}h exit"
                 break
     else:
         return {"r": None, "how": "open"}
@@ -203,11 +248,17 @@ def trade_from(bars: list[Bar], i: int, plan: dict[str, Any], s: dict[str, Any])
     return {"r": round(total, 3), "how": how, "entry": round(entry, 6), "stop": round(stop, 6)}
 
 
+def stats(rs: list[float]) -> dict[str, Any]:
+    return {
+        "n": len(rs),
+        "avg_r": round(sum(rs) / len(rs), 3) if rs else 0.0,
+        "win_rate": round(sum(1 for x in rs if x > 0) / len(rs), 3) if rs else 0.0,
+        "total_r": round(sum(rs), 2),
+    }
+
+
 def backtest_coin(bars: list[Bar], s: dict[str, Any]) -> dict[str, Any]:
-    ema_v, atr_v = (
-        ema([b[4] for b in bars], int(s["trend_ema_hours"])),
-        atr(bars, int(s["atr_hours"])),
-    )
+    ema_v, atr_v = indicators(bars, s)
     trades, busy_until, k = [], -1, int(s["check_hours"])
     for i in range(len(bars)):
         if i <= busy_until or (bars[i][0] // 3600) % k != 0:  # checks on the k-hour grid only
@@ -215,27 +266,39 @@ def backtest_coin(bars: list[Bar], s: dict[str, Any]) -> dict[str, Any]:
         plan = signal_at(bars, i, s, ema_v, atr_v)
         if not plan:
             continue
-        t = trade_from(bars, i, plan, s)
+        t = trade_from(bars, i, plan, s, ema_v, atr_v)
         if t["r"] is None:
             break
         trades.append(t | {"t": bars[i][0]})
         busy_until = i + int(s["max_hold_hours"])  # one trade per coin at a time
-    rs = [t["r"] for t in trades]
-    stats = {
-        "n": len(rs),
-        "avg_r": round(sum(rs) / len(rs), 3) if rs else 0.0,
-        "win_rate": round(sum(1 for x in rs if x > 0) / len(rs), 3) if rs else 0.0,
-        "total_r": round(sum(rs), 2),
+    mid = bars[len(bars) // 2][0] if bars else 0
+    all_s = stats([t["r"] for t in trades])
+    recent = stats([t["r"] for t in trades if t["t"] >= mid])
+    counts = [b[5] for b in bars if len(b) > 5]
+    liquidity = statistics.median(counts) if counts else None
+    if liquidity is not None and liquidity < s["min_bar_trades"]:
+        verdict = "thin book"
+    elif all_s["n"] < s["min_trades"]:
+        verdict = "thin"
+    elif all_s["avg_r"] > 0 and recent["n"] and recent["avg_r"] > 0:
+        verdict = "keep"
+    else:
+        verdict = "drop"
+    return {
+        "stats": all_s,
+        "recent": recent,
+        "trades_per_week": round(all_s["n"] / max(1.0, len(bars) / 168), 2),
+        "median_trades_per_hour": liquidity,
+        "verdict": verdict,
+        "trades": trades[-20:],
     }
-    verdict = "thin" if stats["n"] < s["min_trades"] else "keep" if stats["avg_r"] > 0 else "drop"
-    return {"stats": stats, "verdict": verdict, "trades": trades[-20:]}
 
 
 # --------------------------------------------------------------------------- live desk
 
 
 def qty_round(q: float, price: float) -> float:
-    d = 6 if price >= 1000 else 4 if price >= 10 else 2
+    d = 6 if price >= 1000 else 4 if price >= 10 else 2 if price >= 0.1 else 0
     return math.floor(q * 10**d) / 10**d
 
 
@@ -249,8 +312,23 @@ def save_state(st: dict[str, Any]) -> None:
     (STATE / "positions.json").write_text(json.dumps(st, indent=2) + "\n", encoding="utf-8")
 
 
-def realized(st: dict[str, Any], since: str) -> float:
-    return sum(c["pnl"] for c in st["closed"] if c["at"] >= since)
+def equity(st: dict[str, Any], s: dict[str, Any]) -> dict[str, float]:
+    """Realized equity, its peak, the drawdown from that peak, and the risk still open."""
+    eq = peak = float(s["budget"])
+    for c in st["closed"]:
+        eq += c["pnl"]
+        peak = max(peak, eq)
+    open_risk = sum(
+        max(0.0, (p["entry"] - p["stop"]) * p["qty"] * (0.5 if p.get("t1_done") else 1.0))
+        for p in st["open"].values()
+        if "entry" in p
+    )
+    return {
+        "equity": round(eq, 2),
+        "peak": round(peak, 2),
+        "dd": round(peak - eq, 2),
+        "open_risk": round(open_risk, 2),
+    }
 
 
 def kept_coins(s: dict[str, Any], now: dt.datetime | None = None) -> list[str]:
@@ -270,8 +348,7 @@ def signals(s: dict[str, Any], bars_of=None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for sym in kept_coins(s):
         bars = bars_of(sym)
-        ema_v = ema([b[4] for b in bars], int(s["trend_ema_hours"]))
-        atr_v = atr(bars, int(s["atr_hours"]))
+        ema_v, atr_v = indicators(bars, s)
         plan = signal_at(bars, len(bars) - 1, s, ema_v, atr_v) if bars else None
         out[sym] = plan or {"none": "no fresh 24-hour breakout above the 72-hour trend"}
     return out
@@ -282,6 +359,7 @@ def arm(sym: str, ask: float, bid: float, s: dict[str, Any], plans: dict[str, An
     now = now or dt.datetime.now(dt.UTC)
     st = load_state()
     plan = plans.get(sym) or {}
+    budget = float(s["budget"])
 
     def skip(why: str):
         desk.log_line("SKIP", sym, "-", f"~{ask}", why)
@@ -295,11 +373,6 @@ def arm(sym: str, ask: float, bid: float, s: dict[str, Any], plans: dict[str, An
         return skip("Already holding it")
     if len(st["open"]) >= s["max_open"]:
         return skip(f"Already {len(st['open'])} crypto trades open (max {s['max_open']})")
-    day = now.strftime("%Y-%m-%d")
-    if realized(st, day) <= -s["max_daily_loss_usd"]:
-        return skip(f"Daily crypto loss limit ${s['max_daily_loss_usd']} reached")
-    if realized(st, day[:7]) <= -s["max_monthly_loss_usd"]:
-        return skip(f"Monthly crypto loss limit ${s['max_monthly_loss_usd']} reached")
     spread = (ask - bid) / ((ask + bid) / 2) * 100
     if spread > s["max_spread_pct"]:
         return skip(f"Spread {spread:.2f}% over the {s['max_spread_pct']}% limit (thin book)")
@@ -308,9 +381,25 @@ def arm(sym: str, ask: float, bid: float, s: dict[str, Any], plans: dict[str, An
     stop = plan["stop"]
     if ask <= stop:
         return skip(f"Ask {ask} at or under the stop {stop:.6g}")
+
+    e = equity(st, s)
+    risk = budget * s["risk_per_trade_pct"] / 100
+    if e["dd"] >= budget * s["halve_at_dd_pct"] / 100:
+        risk /= 2  # under pressure: half size until the desk makes a new peak
+    room = budget * (s["max_drawdown_pct"] - s["dd_buffer_pct"]) / 100
+    if e["dd"] + e["open_risk"] + risk > room:
+        return skip(
+            f"Drawdown cap: ${e['dd']:.2f} down from the peak + ${e['open_risk']:.2f} open risk "
+            f"+ ${risk:.2f} would pass ${room:.2f} ({s['max_drawdown_pct']:g}% cap less a "
+            f"{s['dd_buffer_pct']:g}% gap buffer)"
+        )
+    if e["open_risk"] + risk > budget * s["max_open_risk_pct"] / 100:
+        return skip(
+            f"Open risk ${e['open_risk']:.2f} + ${risk:.2f} over the "
+            f"{s['max_open_risk_pct']:g}% cap (coins move together)"
+        )
     r = ask - stop
-    risk = s["budget"] * s["risk_per_trade_pct"] / 100
-    qty = qty_round(min(risk / r, s["budget"] * s["max_position_pct"] / 100 / ask), ask)
+    qty = qty_round(min(risk / r, budget * s["max_position_pct"] / 100 / ask), ask)
     if qty * ask < 10:
         return skip(f"Size too small: {qty} for ${risk:.2f} at risk")
     t1, t2 = ask + s["t1_r"] * r, ask + s["t2_r"] * r
@@ -324,7 +413,8 @@ def arm(sym: str, ask: float, bid: float, s: dict[str, Any], plans: dict[str, An
         f"{qty:g}",
         f"~{ask}",
         f"Crypto 24h breakout: stop {stop:.6g} ({s['stop_atr']:g} ATR), half at T1 {t1:.6g} "
-        f"(+{s['t1_r']:g}R), rest at T2 {t2:.6g} (+{s['t2_r']:g}R) or 24h; risk ${qty * r:.2f}",
+        f"(+{s['t1_r']:g}R), rest at T2 {t2:.6g} (+{s['t2_r']:g}R), out at 24h unless a "
+        f"winner (then trailed, 72h max); risk ${qty * r:.2f}, drawdown ${e['dd']:.2f}",
     )
     order = {"symbol": sym, "side": "buy", "type": "market", "time_in_force": "gtc"}
     return desk.READY, order | {"qty": f"{qty:g}"}
@@ -343,9 +433,10 @@ def stop_order(sym: str, qty: float, stop: float) -> dict[str, Any]:
     }
 
 
-def manage(st: dict[str, Any], prices: dict[str, float], held: dict[str, float], s, now=None):
+def manage(st, prices, held, s, now=None, bars_of=None):
     """What each open trade needs now, as steps for the desk."""
     now = now or dt.datetime.now(dt.UTC)
+    bars_of = bars_of or (lambda sym: fetch_bars(sym, 10))
     steps = []
     for sym, p in st["open"].items():
         q = held.get(sym, 0.0)
@@ -357,19 +448,14 @@ def manage(st: dict[str, Any], prices: dict[str, float], held: dict[str, float],
             steps.append({"symbol": sym, "do": "price", "why": "need the latest price"})
             continue
         age_h = (now - dt.datetime.fromisoformat(p["opened_at"])).total_seconds() / 3600
-        if px >= p["t2"] or age_h >= s["max_hold_hours"]:
-            why = "T2" if px >= p["t2"] else f"{age_h:.0f}h held, the 24h limit"
-            steps.append(
-                {
-                    "symbol": sym,
-                    "do": "close",
-                    "event": "t2" if px >= p["t2"] else "time",
-                    "qty": q,
-                    "cancel": p["stop_id"],
-                    "why": why,
-                }
-            )
-        elif not p.get("t1_done") and px >= p["t1"]:
+        close = {"symbol": sym, "do": "close", "qty": q, "cancel": p["stop_id"]}
+        if px >= p["t2"]:
+            steps.append(close | {"event": "t2", "why": "T2"})
+            continue
+        if age_h >= s["max_hold_hours"]:
+            steps.append(close | {"event": "time", "why": f"{age_h:.0f}h held, the 72h cap"})
+            continue
+        if not p.get("t1_done") and px >= p["t1"]:
             half = qty_round(q / 2, px)
             steps.append(
                 {
@@ -382,6 +468,31 @@ def manage(st: dict[str, Any], prices: dict[str, float], held: dict[str, float],
                     "why": "T1",
                 }
             )
+            continue
+        if age_h < s["base_hold_hours"]:
+            continue
+        recent = bars_of(sym)
+        ema_v, atr_v = indicators(recent, s)
+        opened = int(dt.datetime.fromisoformat(p["opened_at"]).timestamp())
+        bars = [b for b in recent if b[0] >= opened]
+        if p.get("t1_done") and px > ema_v[-1] and px > p["entry"]:  # a winner: keep it, trail it
+            high = max([px, p.get("high", p["entry"])] + [b[2] for b in bars])
+            new = trail_stop(high, atr_v[-1], p["stop"], s)
+            if new < px and new > p["stop"] + 1e-12:
+                steps.append(
+                    {
+                        "symbol": sym,
+                        "do": "trail",
+                        "replace": p["stop_id"],
+                        "stop_price": f"{new:.6g}",
+                        "limit_price": f"{new * 0.995:.6g}",
+                        "high": high,
+                        "why": f"winner past {s['base_hold_hours']}h: trail",
+                    }
+                )
+        else:
+            why = "24h, not a winner" if not p.get("t1_done") else "24h, back under its trend"
+            steps.append(close | {"event": "time", "why": why})
     return steps
 
 
@@ -390,7 +501,7 @@ def done(sym: str, event: str, qty: float, price: float, stop_id: str | None, no
     st = load_state()
     p = st["open"][sym]
     pnl = round((price - p["entry"]) * qty, 2)
-    r = (price - p["entry"]) / (p["entry"] - p["stop"])
+    r = (price - p["entry"]) / (p["entry"] - p["first_stop"]) if p.get("first_stop") else 0.0
     st["closed"].append(
         {
             "symbol": sym,
@@ -409,12 +520,27 @@ def done(sym: str, event: str, qty: float, price: float, stop_id: str | None, no
         del st["open"][sym]
         why = {
             "t2": f"T2 hit: {r:+.1f}R",
-            "time": f"24h limit: out at {r:+.1f}R",
+            "time": f"Time exit: out at {r:+.1f}R",
+            "trail": f"Trailing stop filled: {r:+.1f}R",
             "stopped": f"Stop filled: {r:+.1f}R",
         }[event]
         action = "CLOSE" if event == "time" else "EXIT"
     save_state(st)
-    return desk.log_line(action, sym, f"{qty:g}", f"{price}", f"{why} (P&L ${pnl:+.2f})")
+    e = equity(st, settings_or_defaults())
+    return desk.log_line(
+        action,
+        sym,
+        f"{qty:g}",
+        f"{price}",
+        f"{why} (P&L ${pnl:+.2f}; crypto equity ${e['equity']:.2f}, ${e['dd']:.2f} under peak)",
+    )
+
+
+def settings_or_defaults() -> dict[str, Any]:
+    try:
+        return settings()
+    except SystemExit:
+        return DEFAULTS
 
 
 # --------------------------------------------------------------------------- CLI
@@ -433,6 +559,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("backtest", help="replay the rule on each coin's last 90 days")
     sub.add_parser("signals", help="entries now, on the coins the backtest kept")
+    sub.add_parser("status", help="crypto equity, its peak, the drawdown and open risk")
     p = sub.add_parser("arm", help="every check before a buy; prints the order")
     p.add_argument("symbol", type=str.upper)
     p.add_argument("--ask", type=float, required=True)
@@ -448,9 +575,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("manage", help="what open trades need now")
     p.add_argument("--price", nargs="*", default=[], help="SYM=PRICE")
     p.add_argument("--held", nargs="*", default=[], help="SYM=QTY from get_all_positions")
+    p = sub.add_parser("trailed", help="record a stop raised by the trail")
+    p.add_argument("symbol", type=str.upper)
+    p.add_argument("--stop", type=float, required=True)
+    p.add_argument("--high", type=float)
+    p.add_argument("--stop-id", help="the stop order's id after the replace, if it changed")
     p = sub.add_parser("done", help="record an exit")
     p.add_argument("symbol", type=str.upper)
-    p.add_argument("--event", required=True, choices=["t1", "t2", "time", "stopped"])
+    p.add_argument("--event", required=True, choices=["t1", "t2", "time", "trail", "stopped"])
     p.add_argument("--qty", type=float, required=True)
     p.add_argument("--price", type=float, required=True)
     p.add_argument("--stop-id", help="t1: the new breakeven stop's order id")
@@ -471,6 +603,11 @@ def main(argv: list[str] | None = None) -> int:
             print("lock released")
         return 0
     s = settings()
+    if a.cmd == "status":
+        print(
+            json.dumps(equity(load_state(), s) | {"cap": s["budget"] * s["max_drawdown_pct"] / 100})
+        )
+        return 0
     if a.cmd == "backtest":
         res = {}
         for sym in s["coins"]:
@@ -481,12 +618,19 @@ def main(argv: list[str] | None = None) -> int:
         STATE.mkdir(parents=True, exist_ok=True)
         doc = {"at": dt.datetime.now(dt.UTC).isoformat(timespec="minutes"), "coins": res}
         (STATE / "backtest.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-        for sym, r in res.items():
-            st_ = r.get("stats") or {}
+        kept = [x for x in res.values() if x["verdict"] == "keep"]
+        for sym, r in sorted(
+            res.items(), key=lambda x: -(x[1].get("stats") or {}).get("avg_r", -9)
+        ):
+            st_, rc = r.get("stats") or {}, r.get("recent") or {}
             print(
-                f"{sym:9} {r['verdict']:7} n {st_.get('n', 0):3} avg R {st_.get('avg_r', 0):+.3f} "
-                f"win {st_.get('win_rate', 0):.0%}"
+                f"{sym:11} {r['verdict']:9} n {st_.get('n', 0):3} avg R {st_.get('avg_r', 0):+.3f} "
+                f"win {st_.get('win_rate', 0):.0%} | last 45d n {rc.get('n', 0):2} avg R "
+                f"{rc.get('avg_r', 0):+.3f} | {r.get('trades_per_week', 0):.1f}/week"
             )
+        print(
+            f"kept {len(kept)}: about {sum(x['trades_per_week'] for x in kept):.1f} trades a week"
+        )
         return 0
     if a.cmd == "signals":
         print(json.dumps(signals(s), indent=2))
@@ -508,6 +652,7 @@ def main(argv: list[str] | None = None) -> int:
         r = a.price - pend["stop"]
         st["open"][a.symbol] = pend | {
             "entry": a.price,
+            "first_stop": pend["stop"],
             "t1": round(a.price + s["t1_r"] * r, 6),
             "t2": round(a.price + s["t2_r"] * r, 6),
             "qty": a.qty,
@@ -524,12 +669,26 @@ def main(argv: list[str] | None = None) -> int:
                 f"{a.qty:g}",
                 f"{a.price}",
                 f"Crypto breakout: stop {p['stop']:g} resting (GTC), T1 {p['t1']:g}, "
-                f"T2 {p['t2']:g}, out by 24h",
+                f"T2 {p['t2']:g}, out at 24h unless a winner (trailed, 72h max)",
             )
         )
         return 0
     if a.cmd == "manage":
         print(json.dumps(manage(load_state(), kv(a.price), kv(a.held), s), indent=2))
+        return 0
+    if a.cmd == "trailed":
+        st = load_state()
+        p = st["open"][a.symbol]
+        if a.stop <= p["stop"]:
+            print(
+                f"Not raised: {a.stop} is not above the current stop {p['stop']}", file=sys.stderr
+            )
+            return 2
+        p |= {"stop": a.stop, "high": a.high or p.get("high", p["entry"])}
+        if a.stop_id:
+            p["stop_id"] = a.stop_id
+        save_state(st)
+        print(f"{a.symbol}: trailing stop raised to {a.stop:g}.")
         return 0
     if a.cmd == "done":
         print(done(a.symbol, a.event, a.qty, a.price, a.stop_id))
