@@ -115,9 +115,9 @@ scan.
 
 | New York time | mode | what happens |
 | --- | --- | --- |
-| about 4:45 PM the day before | nightly | `desk.py shortlist --next-day` on the day's close, then `trade-backtest` replays each name's last ~60 sessions with the desk's trade and drops the losers; then `optimize.py review --apply` replays the day's rejects by gate and moves at most one gate one step (bounded, logged in `trader/scout-log.md`) |
+| about 4:45 PM the day before | nightly | `desk.py shortlist --next-day` on the day's close, then `trade-backtest` replays each name's last ~60 sessions with the desk's trade and drops the losers; then `optimize.py review --apply` replays the day's rejects by gate and moves at most one gate one step (bounded, logged in `trader/scout-log.md`); then an agent review of the day (stalled runs, entries, results) with one proposal for the user, never applied by itself |
 | about 9:05 | premarket | Alpaca's movers are added to the shortlist and backtested; every name is researched before the open |
-| 9:45 to 10:45, every 5 min | scan | the shortlist in one to two minutes with `scout.py --pending`: breakouts as market brackets, names within 3 % of their range high as **buy-stop** brackets that fill only on the breakout |
+| 9:45, 9:55, 10:05, 10:20, 10:35 (gaps widen from 10 to 15 min) | scan | the shortlist in one to two minutes with `scout.py --pending`: breakouts as market brackets, names within 3 % of their range high as **buy-stop** brackets that fill only on the breakout |
 | about 11:00 | expire, then a full scan | unfilled buy-stops are cancelled; the whole universe is scanned for movers the shortlist missed |
 | 12:33 | scan, full | late entries |
 | 11:30, 1:30, 2:30 | manage | a trade whose T1 has filled gets its second half's stop moved to breakeven (every scan does this too) |

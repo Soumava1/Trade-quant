@@ -101,7 +101,19 @@ lower conviction; your research note must say plainly when the story is thin.
    (loosen a gate whose rejects would have made money over the last 10
    days; tighten back one whose rejects lose; raise min_score if the names
    that passed lose). Results and any change go to `trader/scout-log.md`.
-5. `D log NONE - - - "Nightly: shortlist of N for <date>; K dropped by the backtest (<tickers>); best <ticker> <avg R>; tuning: <the change, naming the gate and its old and new value, or none>."`,
+5. **Agent review** (daily): read today's lines in `trades-log.md` and the
+   day's `## ` blocks in `trader/scout-log.md`. Append to
+   `trader/scout-log.md` a section `## Agent review <date>` with:
+   - runs that did not finish their job: lock skips, permission or approval
+     blocks, failed or half-placed orders, usage stops, `ATTEMPT` lines with
+     no `BUY` or `SKIP` after them;
+   - entries: each `BUY` (time, entry vs the plan, how far over the range
+     high) and each trade's result so far (`D trades`, `get_orders`);
+   - the one change that would most improve tomorrow's profit or entries,
+     with the evidence, as a proposal for the user.
+   Propose only: never edit agent, skill, settings or scheduled-task files,
+   and never change a gate beyond what step 4 did.
+6. `D log NONE - - - "Nightly: shortlist of N for <date>; K dropped by the backtest (<tickers>); best <ticker> <avg R>; tuning: <the change, naming the gate and its old and new value, or none>; review: <the top proposal, short>."`,
    `D unlock --token <T>`, and report the top ten with their backtest numbers and the tuning.
 
 ## Mode "scan" (default)
