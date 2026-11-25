@@ -53,23 +53,28 @@ def test_append_log_writes_rules_and_each_reject(tmp_path):
 
 def test_review_applies_one_change_and_logs_it(tmp_path, monkeypatch):
     trader = tmp_path / "trader"
-    (trader / "scout" / "2026-11-25_1000").mkdir(parents=True)
+    (trader).mkdir()
     (trader / "config.json").write_text(json.dumps({"paper": True, "scout": {}}))
-    cands = [
-        {"symbol": f"S{i}", "tier": "REJECT", "reasons": ["extended: +1.2%"]} for i in range(16)
-    ]
-    (trader / "scout" / "2026-11-25_1000" / "summary.json").write_text(
-        json.dumps({"candidates": cands})
-    )
+    days = [f"2026-11-{d}" for d in (16, 17, 18, 19, 20)]
+    for day in days:
+        run = trader / "scout" / f"{day}_1000"
+        run.mkdir(parents=True)
+        cands = [
+            {"symbol": f"S{i}", "tier": "REJECT", "reasons": ["extended: +1.2%"]} for i in range(4)
+        ]
+        (run / "summary.json").write_text(json.dumps({"candidates": cands}))
     monkeypatch.setattr(optimize.backtest, "get_chart", lambda sym, off: {})
     monkeypatch.setattr(optimize, "counterfactual", lambda *a: {"r": 0.5, "how": "T1 then T2"})
-    res = optimize.review(trader, "2026-11-25", apply=True)
+    for day in days[:4]:  # 16 winning rejects, but only 4 days: no change yet
+        assert optimize.review(trader, day, apply=True)["applied"] is None
+    assert "4 of the 5 trading days needed" in (trader / "scout-log.md").read_text(encoding="utf-8")
+    res = optimize.review(trader, days[4], apply=True)
     assert res["applied"]["key"] == "max_chase_pct" and res["applied"]["to"] == 1.25
     assert json.loads((trader / "config.json").read_text())["scout"]["max_chase_pct"] == 1.25
     log = (trader / "scout-log.md").read_text(encoding="utf-8")
     assert "**Changed:** `max_chase_pct` 1 -> 1.25" in log
-    optimize.review(trader, "2026-11-25", apply=False)  # a re-run replaces today's rows
-    assert len((trader / "optimizer" / "history.jsonl").read_text().splitlines()) == 16
+    optimize.review(trader, days[4], apply=False)  # a re-run replaces that day's rows
+    assert len((trader / "optimizer" / "history.jsonl").read_text().splitlines()) == 20
 
 
 def test_a_chase_reject_is_replayed_from_when_it_was_seen_not_from_the_breakout():

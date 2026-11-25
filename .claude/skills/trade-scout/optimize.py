@@ -39,6 +39,7 @@ import features  # noqa: E402,I001
 import backtest  # noqa: E402
 
 WINDOW, MIN_N, EDGE_R = 10, 15, 0.15
+MIN_DAYS = 5  # trading days of replays before any change: one odd day must not retune a gate
 CHASE_TEST = 0.02  # a chase reject is replayed as a buy up to 2 % over the range high
 # gate -> (pattern on the scout's reason, config key under "scout", step that LOOSENS,
 #          (min, max), default)
@@ -225,7 +226,7 @@ def review(trader: Path, date: str, apply: bool, offline: Path | None = None) ->
     dates = sorted({r["date"] for r in rows})[-WINDOW:]
     window = [r for r in rows if r["date"] in dates]
     stats = gate_stats(window)
-    moves = propose(stats, sc)
+    moves = propose(stats, sc) if len(dates) >= MIN_DAYS else []
     applied = None
     if apply and moves:
         applied = moves[0]
@@ -259,6 +260,8 @@ def review(trader: Path, date: str, apply: bool, offline: Path | None = None) ->
                 for m in moves
             )
         )
+    elif len(dates) < MIN_DAYS:
+        lines.append(f"\nNo change: {len(dates)} of the {MIN_DAYS} trading days needed so far.")
     else:
         lines.append(f"\nNo change: no gate has {MIN_N}+ replays with avg R beyond ±{EDGE_R}.")
     log = trader / "scout-log.md"
