@@ -53,6 +53,14 @@ All three must hold, or place NOTHING, `D log HALT - - - "<reason>"`,
 
 Never edit any of these to make the guard pass.
 
+## 0c. A blocked Alpaca call
+
+If any Alpaca call comes back saying it needs a person's approval (a
+scheduled run nobody has opened), do not wait and do not retry:
+`D log HALT - - - '<tool name> needs approval in this scheduled run; open the task and press Run now to approve it'`,
+note what was left undone (an order not sent, a stop not moved), unlock and
+stop. The nightly agent review lists these.
+
 ## The log: `trades-log.md`
 
 One line per decision, only through `D log` (or `D arm` / `D record`, which
