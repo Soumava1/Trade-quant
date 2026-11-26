@@ -198,6 +198,23 @@ Never point `.mcp.json` at a live account while `place_stock_order` is on
 `allow`: move it back to `ask` first. Cloud sessions cannot reach Alpaca, so
 only the scheduled tasks on your own computer place paper orders.
 
+## Prop-firm challenge mode (paper)
+
+Both desks trade as one $30,000 challenge account (the $25,000 stock budget plus the $5,000
+crypto budget) on the strictest common prop-firm rules (`prop` in `trader/config.json`,
+`.claude/skills/trade-scout/prop.py`). Every run records Alpaca's equity with
+`desk.py prop --equity E`; every new trade must pass it:
+
+- **Trailing drawdown 3 % ($900)**, intraday from the highest equity, open trades included:
+  the floor only rises. A breach stops all new trades for good.
+- **Daily loss 2 % ($600)** from the day's starting equity.
+- **Profit target 10 % ($3,000):** reached, the challenge is passed and trading stops.
+- **Consistency:** once a day has made 30 % of the target ($900), no new entries that day.
+- **Risk per trade:** at most 0.5 % ($150), and at most a quarter of the room left to the
+  nearer floor after every open trade's risk.
+- **No weekend holding:** stocks are flat every day; the crypto desk takes no entries from
+  Friday 12:00 and closes everything from Friday 15:00, New York time.
+
 ## Stock shorts (paper)
 
 With `"allow_short": true` in `trader/config.json`, the nightly backtest also replays the

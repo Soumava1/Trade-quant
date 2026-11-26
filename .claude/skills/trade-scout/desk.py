@@ -50,7 +50,7 @@ VERDICTS = ("CLEAR", "CAUTION", "DOWNGRADE")
 TIER_ORDER = {"HIGH": 0, "PICK": 1, "WATCH": 2}
 STOP_RUN_WORDS = ("daily loss", "trades per day", "max_trades_per_day", "monthly", "daily limit")
 REPLY = "yes - automatic paper desk, standing instruction from the user"
-READY, SKIPPED, BUSY, STOP_RUN = 0, 1, 3, 4
+READY, SKIPPED, BUSY, STOP_RUN, PROP_STOP = 0, 1, 3, 4, 5
 
 
 def now_ny() -> dt.datetime:
@@ -438,6 +438,17 @@ def split_t1_t2(order: dict[str, Any], entry: float, stop: float) -> list[dict[s
     return [order | {"qty": str(q1), "take_profit_limit_price": t1}, order | {"qty": str(q - q1)}]
 
 
+def prop_allows(risk: float, now: dt.datetime | None = None) -> tuple[bool, str]:
+    """The prop-firm challenge guard (prop.py), with every open stock and crypto trade."""
+    sys.path.insert(0, str(HERE))
+    import prop  # noqa: PLC0415
+
+    crypto = Path("trader/crypto/positions.json")
+    open_crypto = json.loads(crypto.read_text(encoding="utf-8"))["open"] if crypto.exists() else {}
+    open_usd = prop.open_risk(load_trades(now), open_crypto)
+    return prop.allow(risk, read_config(), open_usd, now)
+
+
 def traded_today(log: Path, symbol: str, now: dt.datetime) -> bool:
     if not log.exists():
         return False
@@ -491,6 +502,9 @@ def arm(
         return skip("WATCH needs research CLEAR")
     if traded_today(log, sym, now):
         return skip("Already traded today")
+    ok, why = prop_allows(float((c.get("size") or {}).get("max_loss") or 0), now)
+    if not ok:
+        return skip(why)
     if short:  # `ask` is the bid here: the price a short sale fills at
         if ask < entry * (1 - MAX_CHASE):
             return skip(
@@ -702,6 +716,8 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--token", help="the token `lock` printed: removes only that lock")
     g.add_argument("--force", action="store_true", help="by hand only: remove any lock")
     sub.add_parser("shorts", help="short-side breakdowns on the shortlist, as candidates")
+    p = sub.add_parser("prop", help="the prop-challenge check: record equity, print the status")
+    p.add_argument("--equity", type=float, required=True, help="get_account_info's equity")
     p = sub.add_parser("candidates", help="the newest scout run's tradable trades, as JSON")
     p.add_argument("--summary", type=Path, help="a summary.json (default: the newest run)")
     p = sub.add_parser("shortlist", help="before the open: the names to watch at the open")
@@ -745,6 +761,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--note", default="")
     a = ap.parse_args(argv)
 
+    if a.cmd == "prop":
+        sys.path.insert(0, str(HERE))
+        import prop  # noqa: PLC0415
+
+        st = prop.update(a.equity, read_config())
+        print(json.dumps({k: v for k, v in st.items() if k != "days"}, indent=2))
+        return 0 if st["status"] == "ok" else PROP_STOP
     if a.cmd == "shorts":
         sys.path.insert(0, str(HERE))
         import shorts  # noqa: PLC0415 - only the short side needs it

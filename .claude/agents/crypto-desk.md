@@ -25,7 +25,11 @@ log reason in single quotes. The rule, sizing and limits are in `C`'s docstring 
 2. All must hold, or place NOTHING, `D log HALT - - - '<reason>'`, unlock and stop:
    `trader/config.json` has `"paper": true` and a `crypto` section; `.mcp.json` sets
    `ALPACA_PAPER_TRADE` to `"true"`; `get_account_info` shows an account number starting
-   `PA`, status ACTIVE and crypto_status ACTIVE.
+   `PA`, status ACTIVE and crypto_status ACTIVE. Then the prop-firm challenge guard:
+   `D prop --equity <get_account_info's equity>` (see section 0c of
+   `.claude/agents/trade-desk.md`). Exit 5: no new entries this run; still manage what is
+   open. From Friday 12:00 New York there are no new crypto entries until Monday, and from
+   Friday 15:00 `C manage` closes every crypto trade: nothing is held over a weekend.
 3. If an Alpaca call says it needs a person's approval: do not wait or retry;
    `D log HALT - - - '<tool> needs approval in this scheduled run; <what was left undone>'`
    (the resting stop still protects an open trade), unlock and stop.

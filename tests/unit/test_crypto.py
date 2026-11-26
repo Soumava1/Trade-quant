@@ -5,8 +5,17 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / ".claude" / "skills" / "crypto-desk"))
 import crypto  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_prop_guard(monkeypatch):
+    """The challenge guard has its own tests (test_prop.py); here it always allows."""
+    monkeypatch.setattr(crypto.desk, "prop_allows", lambda risk, now=None: (True, ""))
+
 
 S = crypto.DEFAULTS | {"fee_pct": 0.0}
 T0 = 1_795_000_000 - (1_795_000_000 % (4 * 3600))  # on the 4-hour check grid
@@ -183,3 +192,20 @@ def test_guards_no_crypto_section_a_stale_backtest_and_the_kill_switch(tmp_path,
     assert crypto.kept_coins(S, NOW + dt.timedelta(hours=48)) == []  # 58h old: trades nothing
     off = S | {"enabled": False}
     assert crypto.arm("SOL/USD", 70.1, 70.05, off, PLAN)[0] == crypto.desk.SKIPPED
+
+
+def test_weekend_rule_no_entries_from_friday_noon_and_flat_from_friday_3pm(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fri_1pm = dt.datetime(2026, 11, 27, 13, tzinfo=crypto.desk.NY)
+    assert crypto.weekend(fri_1pm) and not crypto.weekend(fri_1pm - dt.timedelta(hours=2))
+    assert crypto.arm("SOL/USD", 70.1, 70.05, S, PLAN, fri_1pm)[0] == crypto.desk.SKIPPED
+    p = {"entry": 70.0, "stop": 68.0, "t1": 74.0, "t2": 78.0, "stop_id": "s1"}
+    p["opened_at"] = (fri_1pm - dt.timedelta(hours=3)).isoformat()
+    steps = crypto.manage(
+        {"open": {"SOL/USD": p}},
+        {"SOL/USD": 71.0},
+        {"SOL/USD": 10.0},
+        S,
+        fri_1pm + dt.timedelta(hours=2),
+    )
+    assert steps[0]["do"] == "close" and "weekend" in steps[0]["why"]

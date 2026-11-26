@@ -97,5 +97,15 @@
     "max_chase_pct": 1.0,
     "fee_pct": 0.25,
     "min_bar_trades": 10
+  },
+  "prop": {
+    "size": 30000,
+    "max_drawdown_pct": 3.0,
+    "daily_loss_pct": 2.0,
+    "profit_target_pct": 10.0,
+    "consistency_pct": 30.0,
+    "max_risk_pct": 0.5,
+    "risk_of_room": 0.25,
+    "min_trading_days": 5
   }
 }

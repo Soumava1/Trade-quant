@@ -367,6 +367,8 @@ def arm(sym: str, ask: float, bid: float, s: dict[str, Any], plans: dict[str, An
 
     if not s.get("enabled", True):
         return skip("Crypto desk disabled in the config (enabled: false)")
+    if weekend(now):
+        return skip("Weekend rule: no crypto entries from Friday 12:00 to Monday (New York)")
     if "entry" not in plan:
         return skip(f"No crypto entry: {plan.get('none', 'not a kept coin')}")
     if sym in st["open"]:
@@ -402,6 +404,9 @@ def arm(sym: str, ask: float, bid: float, s: dict[str, Any], plans: dict[str, An
     qty = qty_round(min(risk / r, budget * s["max_position_pct"] / 100 / ask), ask)
     if qty * ask < 10:
         return skip(f"Size too small: {qty} for ${risk:.2f} at risk")
+    ok, why = desk.prop_allows(round(qty * r, 2), now.astimezone(desk.NY))
+    if not ok:
+        return skip(why)
     t1, t2 = ask + s["t1_r"] * r, ask + s["t2_r"] * r
     pending = {"symbol": sym, "entry": ask, "stop": round(stop, 6), "t1": round(t1, 6)}
     pending |= {"t2": round(t2, 6), "qty": qty, "planned_at": now.isoformat()}
@@ -433,6 +438,18 @@ def stop_order(sym: str, qty: float, stop: float) -> dict[str, Any]:
     }
 
 
+def weekend(now: dt.datetime) -> bool:
+    """No new crypto trade from Friday 12:00 to Monday 00:00, New York time."""
+    ny = now.astimezone(desk.NY)
+    return ny.weekday() >= 5 or (ny.weekday() == 4 and ny.hour >= 12)
+
+
+def flat_for_weekend(now: dt.datetime) -> bool:
+    """Every crypto trade is closed from Friday 15:00 New York: nothing held over a weekend."""
+    ny = now.astimezone(desk.NY)
+    return ny.weekday() >= 5 or (ny.weekday() == 4 and ny.hour >= 15)
+
+
 def manage(st, prices, held, s, now=None, bars_of=None):
     """What each open trade needs now, as steps for the desk."""
     now = now or dt.datetime.now(dt.UTC)
@@ -451,6 +468,11 @@ def manage(st, prices, held, s, now=None, bars_of=None):
         close = {"symbol": sym, "do": "close", "qty": q, "cancel": p["stop_id"]}
         if px >= p["t2"]:
             steps.append(close | {"event": "t2", "why": "T2"})
+            continue
+        if flat_for_weekend(now):
+            steps.append(
+                close | {"event": "time", "why": "weekend rule: flat before Friday's close"}
+            )
             continue
         if age_h >= s["max_hold_hours"]:
             steps.append(close | {"event": "time", "why": f"{age_h:.0f}h held, the 72h cap"})

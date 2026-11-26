@@ -11,6 +11,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / ".claude" / "skills" / "trade-scout"))
 import desk  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _no_prop_guard(monkeypatch):
+    """The challenge guard has its own tests (test_prop.py); here it always allows."""
+    monkeypatch.setattr(desk, "prop_allows", lambda risk, now=None: (True, ""))
+
+
 T = dt.datetime(2026, 11, 23, 10, 24, tzinfo=desk.NY)
 
 

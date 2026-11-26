@@ -53,7 +53,19 @@ All three must hold, or place NOTHING, `D log HALT - - - "<reason>"`,
 
 Never edit any of these to make the guard pass.
 
-## 0c. A blocked Alpaca call
+
+## 0c. The prop-firm challenge guard
+
+Right after the paper guard: `D prop --equity <get_account_info's equity>`. It records the
+challenge account's equity ($30,000 at the start, stocks and crypto together), moves the
+trailing high-water mark and the day, and prints the floors and the room left. Exit 5: no
+new trade this run (a breach, the profit target, or the day's 30 % profit cap): still
+manage, expire and flatten what is open; `D log NONE - - - '<its reasons>'`, or
+`D log HALT - - - '<the breach>'` the first time a breach shows. `D arm` checks the guard
+again for each trade's own risk, counting every open trade's risk first; a check over 20
+minutes old refuses, so run `D prop` at the start of every run.
+
+## 0d. A blocked Alpaca call
 
 If any Alpaca call comes back saying it needs a person's approval (a
 scheduled run nobody has opened), do not wait and do not retry:
