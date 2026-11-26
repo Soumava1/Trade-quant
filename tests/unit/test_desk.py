@@ -342,3 +342,32 @@ def test_breakeven_logs_the_t1_exit_once_with_the_dollar_sign_intact(tmp_path, m
     assert len(exits) == 1 and "| BAX | EXIT | 4 sh | $27.50 |" in exits[0]
     assert "moved to breakeven $27.10." in exits[0]
     assert desk.load_trades()["BAX"]["breakeven"] is True
+
+
+def test_a_short_is_checked_against_the_bid_split_downward_and_logged_as_short(tmp_path):
+    short = cand("S1", "PICK", 0, entry=100.0, stop=101.0, target=98.0, reason="short breakdown")
+    short["side"] = "sell"
+    short["order"] |= {"side": "sell"}
+    (code, _), f, _ = arm(tmp_path, "S1", 98.5, cands=[short])  # 1.5 % under the entry
+    assert code == desk.SKIPPED and "Stale: bid $98.50 is 1.5% under" in f["log"].read_text(
+        encoding="utf-8"
+    )
+    other = tmp_path / "ok"
+    other.mkdir()
+    (code, legs), f, _ = arm(other, "S1", 99.6, cands=[short])
+    assert code == desk.READY and legs[0]["take_profit_limit_price"] == "99.00"  # entry - 1R
+    assert "SHORT, lower conviction" in f["log"].read_text(encoding="utf-8")
+    line = desk.record(
+        "S1",
+        "placed",
+        "a,b",
+        "3",
+        "99.6",
+        now=T,
+        log=f["log"],
+        pending=f["pending"],
+        run=FakeRun(),
+        trades=other / "trades.json",
+    )
+    assert "| S1 | SHORT | 3 sh |" in line
+    assert desk.load_trades(path=other / "trades.json")["S1"]["side"] == "sell"

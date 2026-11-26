@@ -45,7 +45,7 @@ SCOUT_DIR = Path("trader/scout")
 STALE_MIN = 45  # a run that died without unlocking stops blocking after this long
 MAX_CHASE = 0.01  # the ask may be at most 1 % over the planned entry
 PENDING_CUTOFF = dt.time(11, 0)  # no new buy-stop entries from 11:00 (the expire step's time)
-ACTIONS = ("BUY", "SKIP", "ATTEMPT", "EXIT", "CLOSE", "NONE", "HALT")
+ACTIONS = ("BUY", "SHORT", "SKIP", "ATTEMPT", "EXIT", "CLOSE", "NONE", "HALT")
 VERDICTS = ("CLEAR", "CAUTION", "DOWNGRADE")
 TIER_ORDER = {"HIGH": 0, "PICK": 1, "WATCH": 2}
 STOP_RUN_WORDS = ("daily loss", "trades per day", "max_trades_per_day", "monthly", "daily limit")
@@ -220,6 +220,7 @@ def candidates_report(
         rows.append(
             {
                 "symbol": c["symbol"],
+                "side": (c.get("order") or {}).get("side", "buy"),
                 "tier": c["tier"],
                 "score": c.get("score"),
                 "entry": plan.get("entry"),
@@ -412,8 +413,14 @@ def describe(c: dict[str, Any], verdict: str, note: str = "") -> str:
         )
     else:
         base = f"WATCH, lower conviction: missed {missed_gate(c)} (score {score:.0f})"
+    if c.get("side") == "sell":
+        base = f"SHORT, lower conviction (no Time Machine check): {missed_gate(c) or 'breakdown'}"
     if c.get("pending"):
-        base += "; buy-stop at the range high, not broken out yet"
+        base += (
+            "; sell-stop at the range low, not broken down yet"
+            if c.get("side") == "sell"
+            else "; buy-stop at the range high, not broken out yet"
+        )
     text = f"{base}; research {verdict}"
     return f"{text} ({note.strip().rstrip('.')})" if note.strip() else text
 
@@ -435,7 +442,7 @@ def traded_today(log: Path, symbol: str, now: dt.datetime) -> bool:
     if not log.exists():
         return False
     day = f"- {now:%Y-%m-%d}"
-    marks = (f"| {symbol} | BUY |", f"| {symbol} | ATTEMPT |")
+    marks = (f"| {symbol} | BUY |", f"| {symbol} | SHORT |", f"| {symbol} | ATTEMPT |")
     return any(
         line.startswith(day) and any(m in line for m in marks)
         for line in log.read_text(encoding="utf-8").splitlines()
@@ -474,19 +481,28 @@ def arm(
         log_line("SKIP", sym, "-", f"~{entry}", f"{why}; {describe(c, verdict, note)}", log, now)
         return code, None
 
+    short = (c.get("order") or {}).get("side") == "sell"
     if (c.get("order") or {}).get("type") == "stop" and now.time() >= PENDING_CUTOFF:
-        return skip(f"Buy-stop plan after the {PENDING_CUTOFF:%H:%M} cutoff")
+        kind = "Sell-stop" if short else "Buy-stop"
+        return skip(f"{kind} plan after the {PENDING_CUTOFF:%H:%M} cutoff")
     if verdict == "DOWNGRADE":
         return skip("Research DOWNGRADE")
     if c["tier"] == "WATCH" and verdict != "CLEAR":
         return skip("WATCH needs research CLEAR")
     if traded_today(log, sym, now):
         return skip("Already traded today")
-    if ask > entry * (1 + MAX_CHASE):
+    if short:  # `ask` is the bid here: the price a short sale fills at
+        if ask < entry * (1 - MAX_CHASE):
+            return skip(
+                f"Stale: bid ${ask:.2f} is {1 - ask / entry:.1%} under the planned entry (limit 1%)"
+            )
+        if ask >= stop:
+            return skip(f"Stale: bid ${ask:.2f} is at or over the stop ${stop:.2f}")
+    elif ask > entry * (1 + MAX_CHASE):
         return skip(
             f"Stale: ask ${ask:.2f} is {ask / entry - 1:.1%} over the planned entry (limit 1%)"
         )
-    if ask <= stop:
+    elif ask <= stop:
         return skip(f"Stale: ask ${ask:.2f} is at or under the stop ${stop:.2f}")
 
     # The scout's summary drops the order's plan; trader-risk needs it for the entry price
@@ -527,6 +543,7 @@ def arm(
                 "legs": [leg["qty"] for leg in legs],
                 "reason": reason,
                 "stop_entry": stop_entry,
+                "side": "sell" if short else "buy",
             }
         ),
         encoding="utf-8",
@@ -580,7 +597,8 @@ def record_fill(
     done = list(t.get("fills") or [])
     if order_id in done:
         return f"{sym}: the fill of order {order_id} is already recorded"
-    args = ["fill", "--symbol", sym, "--side", "sell", "--qty", str(qty), "--price", str(price)]
+    exit_side = "buy" if t.get("side") == "sell" else "sell"  # a short is closed by buying
+    args = ["fill", "--symbol", sym, "--side", exit_side, "--qty", str(qty), "--price", str(price)]
     r = run("trader-broker/ticket.py", *args)
     if r.returncode:
         raise ValueError(f"ticket.py fill: {(r.stderr or r.stdout).strip()[:200]}")
@@ -633,12 +651,15 @@ def record(
             plan += f"; only {len(ids)} of {len(legs)} brackets placed"
         if price:
             tail = ""
+        elif p.get("stop_entry") and p.get("side") == "sell":
+            tail = " Sell-stop resting at the range low: fills only on the breakdown."
         elif p.get("stop_entry"):
             tail = " Buy-stop resting at the range high: fills only on the breakout."
         else:
             tail = " Fill not reported yet."
         why = f"{plan}; {p['reason']}.{tail}"
-        line = log_line("BUY", sym, str(qty or p["qty"]), fill, why, log, now)
+        action = "SHORT" if p.get("side") == "sell" else "BUY"
+        line = log_line(action, sym, str(qty or p["qty"]), fill, why, log, now)
         save_trade(
             {
                 "symbol": sym,
@@ -649,6 +670,7 @@ def record(
                 "legs": legs,
                 "order_ids": ids,  # T1 bracket first, then T2
                 "stop_entry": p.get("stop_entry", False),
+                "side": p.get("side", "buy"),
                 "breakeven": False,
             },
             now,
@@ -679,6 +701,7 @@ def main(argv: list[str] | None = None) -> int:
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--token", help="the token `lock` printed: removes only that lock")
     g.add_argument("--force", action="store_true", help="by hand only: remove any lock")
+    sub.add_parser("shorts", help="short-side breakdowns on the shortlist, as candidates")
     p = sub.add_parser("candidates", help="the newest scout run's tradable trades, as JSON")
     p.add_argument("--summary", type=Path, help="a summary.json (default: the newest run)")
     p = sub.add_parser("shortlist", help="before the open: the names to watch at the open")
@@ -722,6 +745,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--note", default="")
     a = ap.parse_args(argv)
 
+    if a.cmd == "shorts":
+        sys.path.insert(0, str(HERE))
+        import shorts  # noqa: PLC0415 - only the short side needs it
+
+        path = shorts.run(now_ny(), read_config(), SHORTLIST, Path("trader/shorts"))
+        rep = candidates_report(path)
+        print(json.dumps(rep | {"summary": str(path)}, indent=2))
+        return 0
     if a.cmd == "candidates":
         try:
             print(json.dumps(candidates_report(a.summary or newest_summary()), indent=2))

@@ -144,3 +144,38 @@ def test_cli_rewrites_the_shortlist_from_offline_charts(tmp_path, monkeypatch):
     doc = json.loads(sl.read_text())
     assert [h["symbol"] for h in doc["hits"]] == ["WIN"] and doc["dropped"] == ["LOSE"]
     assert doc["hits"][0]["backtest"]["verdict"] == "keep"
+
+
+def test_short_mirror_t1_then_t2_and_a_stop_is_minus_one():
+    # range 100-99 (low 99); trigger 98.99, stop max(100, 98.99 + 0.5) = 100 -> R 1.01
+    down = RANGE + [(99.6, 98.9, 99.0), (98.5, 97.5, 97.8), (97.6, 96.8, 97.0)]
+    t = backtest.session_trade_short(flat_to_close(session(down), 97.0), atr=2.0, k=2.0)
+    assert t["entry"] == 98.99 and t["stop"] == 100.0 and t["t1"] == 97.98
+    assert t["r"] == 1.5 and t["how"] == "T1 then T2" and t["side"] == "sell"
+    squeeze = RANGE + [(99.6, 98.9, 99.0), (100.5, 99.0, 100.3)]
+    t = backtest.session_trade_short(flat_to_close(session(squeeze), 100.3), atr=2.0, k=2.0)
+    assert t["r"] == -1.0 and t["how"] == "stop"
+
+
+def test_cli_keeps_a_name_for_shorts_when_only_its_short_side_wins(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    charts = tmp_path / "charts"
+    charts.mkdir()
+    day = 86400
+    base = 1795000000 - (1795000000 % day) + 14 * 3600 + 30 * 60
+    ts, q = [], {k: [] for k in ("open", "high", "low", "close", "volume")}
+    for d in range(25):  # every session breaks down through the range low and keeps falling
+        path = RANGE + [(99.6, 98.9, 99.0), (98.5, 97.5, 97.8), (97.6, 96.8, 97.0)]
+        for m, o, h, lo, c, v in flat_to_close(session(path), 97.0):
+            ts.append(base + d * day + (m - OPEN) * 60)
+            for k, x in zip(q, (o, h, lo, c, v), strict=True):
+                q[k].append(x)
+    chart = {"chart": {"result": [{"timestamp": ts, "indicators": {"quote": [q]}}]}}
+    (charts / "DOWN.json").write_text(json.dumps(chart))
+    sl = tmp_path / "shortlist.json"
+    sl.write_text(json.dumps({"date": "x", "hits": [{"symbol": "DOWN"}]}))
+    args = ["--shortlist", str(sl), "--drop-losers", "--offline-dir", str(charts), "--shorts"]
+    backtest.main(args)
+    doc = json.loads(sl.read_text())
+    assert [h["symbol"] for h in doc["hits"]] == ["DOWN"] and doc["dropped"] == []
+    assert doc["hits"][0]["short_backtest"]["verdict"] == "keep"

@@ -198,6 +198,18 @@ Never point `.mcp.json` at a live account while `place_stock_order` is on
 `allow`: move it back to `ask` first. Cloud sessions cannot reach Alpaca, so
 only the scheduled tasks on your own computer place paper orders.
 
+## Stock shorts (paper)
+
+With `"allow_short": true` in `trader/config.json`, the nightly backtest also replays the
+mirror trade on every shortlist name: a sell-stop one cent under the 5-minute opening-range
+low, the stop at the range high but at least 0.25x ATR away, half covered at 1R with the
+rest's stop moved to the entry, the rest at the best of 2R/3R/4R, out by 15:55. A name whose
+short side made money is kept for shorts (even if its long side lost). In a scan,
+`desk.py shorts` plans breakdowns on those names only while SPY is under its VWAP, the
+stock is in play and under its own VWAP, and Alpaca lists it as shortable and easy to
+borrow. Shorts are sized to the same max loss, at most 25 % of the budget, go through the
+same trader-risk check and T1/T2 split, and are logged as `SHORT`.
+
 ## Crypto desk (paper)
 
 `.claude/agents/crypto-desk.md` runs every 4 hours, around the clock, on its own $5,000

@@ -147,9 +147,12 @@ lower conviction; your research note must say plainly when the story is thin.
    universe, 5 to 10 minutes). The cloud owns the journal. Exit 2 means it
    could not run (closed market, range still forming):
    `D log NONE - - - "<its one-line reason>"`, `D unlock --token <T>`, stop.
-3. `D candidates`. If `candidates` is empty, `D log NONE - - - "<none_reason>"`,
-   `D unlock --token <T>`, stop. The list is already in order: HIGH, then the PICK, then
-   sized WATCH.
+3. `D candidates` (the longs). Then, if `trader/config.json` has `"allow_short": true`,
+   `D shorts` (the short side: opening-range breakdowns on shortlist names whose short
+   replay made money, only while SPY is under its VWAP; it prints its own `summary` path).
+   If both lists are empty, `D log NONE - - - '<none_reason; and the shorts' note>'`,
+   `D unlock --token <T>`, stop. Each list is in order: HIGH, then the PICK, then sized
+   WATCH; every short is a PICK (lower conviction: no Time Machine check).
 4. **Research**. A candidate with a `verdict_today` was researched this
    morning: reuse it unless one of its `news` headlines is new since then.
    Research the rest, in one call: `D research T1 T2 ...`. It writes
@@ -159,17 +162,19 @@ lower conviction; your research note must say plainly when the story is thin.
    Open at most the top two links per ticker, and only when a headline could
    change the verdict.
 5. For each candidate, best first:
-   a. `get_stock_latest_quote` for its ask.
-   b. `D arm SYM --ask ASK --research VERDICT --note "<the facts, short>"`.
-      It checks the price (at most 1 % over the plan's entry, above the
-      stop), WATCH-needs-CLEAR, DOWNGRADE, already-traded-today and
+   a. `get_stock_latest_quote` for its ask (a short: its **bid**).
+   b. `D arm SYM --ask ASK --research VERDICT --note '<the facts, short>'`; for a short,
+      `--ask <the bid> --summary <the shorts summary path>`.
+      It checks the price (a long: at most 1 % over the plan's entry, above the
+      stop; a short: at most 1 % under it, under the stop), WATCH-needs-CLEAR, DOWNGRADE, already-traded-today and
       trader-risk, records the approval, and logs `SKIP` or `ATTEMPT`. From
-      11:00 on it also skips any buy-stop (`entry_type` "stop") plan: the
-      morning buy-stops expire then, and a new one must not replace them.
+      11:00 on it also skips any buy-stop or sell-stop (`entry_type` "stop") plan:
+      the morning stop entries expire then, and a new one must not replace them.
       Exit 1: skipped, go on to the next. Exit 4: a daily or monthly limit is
       hit, place nothing more this run. Exit 0: it printed the orders, a
-      list: two brackets (half the shares to T1 at +1R, the rest to T2),
-      or one when the position is a single share (all to T1).
+      list: two brackets (half the shares to T1 at 1R, the rest to T2),
+      or one when the position is a single share (all to T1). A short's
+      brackets are sells with the take-profit under the entry and the stop over it.
    c. Call `place_stock_order` once per order, in the printed order (T1
       bracket first), each with exactly that JSON. Never change one, and
       never send one without `stop_loss_stop_price`.
@@ -185,7 +190,8 @@ lower conviction; your research note must say plainly when the story is thin.
 ## Mode "manage" (first in every scan, and on its own in the afternoon)
 
 T1 rule: once the T1 bracket's take-profit has filled, the T2 half's stop
-goes up to the entry, so the rest of the trade can no longer lose.
+moves to the entry (up for a long, down for a short), so the rest of the trade can no
+longer lose. A trade's `side` in `D trades` says which.
 
 1. Lock (skip when called from inside a scan, which holds it) and paper
    guard. `D trades` lists today's desk trades with `entry`, `t1`, `t2` and
@@ -199,26 +205,29 @@ goes up to the entry, so the rest of the trade can no longer lose.
 3. For each trade with two order ids and `breakeven` false:
    - T1 bracket's take-profit **filled**, T2 bracket still open: take the T2
      bracket's stop-loss leg and `replace_order_by_id` it with
-     `stop_price` = the trade's `entry` (never lower than its current stop,
-     never higher than the entry). Then `D breakeven SYM --price <T1 fill>`,
+     `stop_price` = the trade's `entry` (a long: never lower than its current stop,
+     never higher than the entry; a short: never higher than its current stop, never
+     lower than the entry). Then `D breakeven SYM --price <T1 fill>`,
      which marks it and logs the T1 `EXIT` line itself (once).
    - Both brackets stopped out: `D log EXIT SYM <qty> <stop fill> "Stop hit on both halves: -1R."`
    - T2 filled: `D log EXIT SYM <T2 qty> <T2 fill> "T2 hit: +<k>R on the second half."`
    Log each EXIT once: skip one whose leg was already recorded by `D fill`
    on an earlier run.
-4. Change nothing else: never move a stop down, never touch a take-profit,
+4. Change nothing else: never move a stop against the trade (down for a long, up
+   for a short), never touch a take-profit,
    never touch an order the desk did not place. `D unlock --token <T>` if you locked.
 
 ## Mode "expire" (about 11:00)
 
-Buy-stops planned in the morning should not fill in the afternoon.
+Stop entries (buy-stops, and sell-stops for shorts) planned in the morning should not
+fill in the afternoon.
 
 1. Lock and paper guard. `get_orders` (status open, nested).
-2. For each symbol the log shows as `BUY` today whose entry orders are still
-   open and unfilled (buy `stop` orders, not the brackets' sell legs; there
+2. For each symbol the log shows as `BUY` or `SHORT` today whose entry orders are still
+   open and unfilled (the `stop` entry orders, not the brackets' exit legs; there
    are two, one per bracket, in `D trades`): `cancel_order_by_id` each entry
    (its legs go with it), then
-   `D log SKIP SYM - - "Buy-stop expired unfilled at 11:00: the breakout never came."`
+   `D log SKIP SYM - - 'Stop entry expired unfilled at 11:00: the breakout never came.'`
 3. Leave filled positions and everything the desk did not place. `D unlock --token <T>`.
 
 ## Mode "flatten" (about 3:40 PM; flat by 15:55 is a hard rule)
@@ -227,28 +236,29 @@ Buy-stops planned in the morning should not fill in the afternoon.
    (status **all**, nested): the open orders to cancel, and the filled legs
    (ids, quantities, prices) step 3 records, including any that filled since
    the last manage run.
-2. Any desk buy-stop from today still unfilled: cancel it as in "expire" and
+2. Any desk stop entry (buy-stop or sell-stop) from today still unfilled: cancel it as in "expire" and
    log the `SKIP`.
 3. Run "manage" step 2 on the filled legs from step 1's status-all list, so
    every leg that already filled today (T1, T2, stops) is in the broker's
    fill log once.
-4. For each symbol the log shows as `BUY` today:
+4. For each symbol the log shows as `BUY` or `SHORT` today:
    - **Still open**: `get_orders` (status open, nested) and
      `cancel_order_by_id` each of its open bracket legs, then
-     `close_position` for that symbol only, which sells only the shares
-     still held (after a T1, the remaining half). Record that sell with
+     `close_position` for that symbol only, which sells (or, for a short, buys back)
+     only the shares still held (after a T1, the remaining half). Record that with
      `D fill S --qty Q --price P --order-id <the close order's id>`, then
      `D log CLOSE S Q P "<the R it ended at>"`.
    - **Already closed** (stop or targets filled): its legs are recorded by
      step 3; `D log EXIT S Q P "..."` only for a leg no earlier run logged.
-5. A position NOT bought by the desk today is not yours: leave it, log
+5. A position NOT opened by the desk today is not yours: leave it, log
    nothing, mention it in the report.
 6. Never call `close_all_positions` or `cancel_all_orders`. `D unlock --token <T>`.
 
 ## Never
 
 - Never place an order that `D arm` did not print in this run, has no stop,
-  is short, an option or crypto, or would exceed the config's limits.
+  is an option or crypto, is a short while `"allow_short"` is not true, or would
+  exceed the config's limits.
 - Never loosen a scout or risk threshold beyond the WATCH rule (the user's
   choice, 2026-11-23), never change a plan's numbers, and never upgrade a
   trade the research desk downgraded.

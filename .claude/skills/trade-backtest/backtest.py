@@ -170,8 +170,96 @@ def stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def backtest_symbol(chart: dict[str, Any], symbol: str, **rule: Any) -> dict[str, Any]:
+def session_trade_short(
+    bars: list,
+    atr: float,
+    k: float,
+    or_minutes: int = 5,
+    min_stop_atr: float = 0.25,
+    entry_from: str = "09:45",
+    entry_until: str = "15:30",
+    flat_by: str = "15:55",
+    max_chase: float = MAX_CHASE,
+) -> dict[str, Any] | None:
+    """The mirror of session_trade: a sell-stop one cent under the opening-range low, the
+    stop at the range high but at least min_stop_atr x ATR above the fill, half covered at
+    -1R with the rest's stop moved to the entry, the rest at -kR, out at flat_by. Ties inside
+    a bar go against the trade: the stop before any target."""
+    or_end = OPEN + or_minutes
+    rng = [b for b in bars if b[0] < or_end]
+    if len(rng) < max(1, or_minutes // 5):
+        return None
+    level, or_high = min(b[3] for b in rng), max(b[2] for b in rng)
+    trigger = round(level - 0.01, 2)
+    start, until, flat = hm(entry_from), hm(entry_until), hm(flat_by)
+    fill_i = next(
+        (
+            i
+            for i, b in enumerate(bars)
+            if b[0] >= max(or_end, start) and b[0] < until and b[3] <= trigger
+        ),
+        None,
+    )
+    if fill_i is None:
+        return None
+    fb = bars[fill_i]
+    fill = min(trigger, fb[1])
+    if fill < trigger * (1 - max_chase):
+        return None
+    stop = math.ceil(max(or_high, fill + min_stop_atr * atr) * 100) / 100
+    r = stop - fill
+    if r <= 0:
+        return None
+    t1, t2 = fill - r, fill - k * r
+    trade = {"date": "", "time": f"{fb[0] // 60}:{fb[0] % 60:02d}", "entry": round(fill, 2)}
+    trade |= {"stop": stop, "t1": round(t1, 2), "t2": round(t2, 2), "side": "sell"}
+    if fb[4] >= stop:  # the fill bar already closed through the stop
+        return trade | {"r": -1.0, "how": "stop on the fill bar"}
+    half1 = half2 = None
+    cur_stop = stop
+    for b in bars[fill_i + 1 :]:
+        if b[0] >= flat:
+            px = b[1]
+            half1 = (fill - px) / r if half1 is None else half1
+            half2 = (fill - px) / r if half2 is None else half2
+            break
+        if b[2] >= cur_stop:  # stop first: the worst reading of the bar
+            out = (fill - cur_stop) / r
+            half1 = out if half1 is None else half1
+            half2 = out if half2 is None else half2
+            break
+        if half1 is None and b[3] <= t1:
+            half1, cur_stop = 1.0, fill
+            if b[2] >= cur_stop:  # the same bar also traded back up to the entry
+                half2 = 0.0
+                break
+        if half1 is not None and b[3] <= t2:
+            half2 = k
+            break
+    else:
+        px = bars[-1][4]
+        half1 = (fill - px) / r if half1 is None else half1
+        half2 = (fill - px) / r if half2 is None else half2
+    total = 0.5 * half1 + 0.5 * half2
+    how = (
+        "T1 then T2"
+        if half2 == k
+        else "T1 then breakeven"
+        if half1 == 1.0 and abs(half2) < 1e-9
+        else "T1 then the close"
+        if half1 == 1.0
+        else "stop"
+        if total <= -0.999
+        else "the close"
+    )
+    return trade | {"r": round(total, 3), "how": how}
+
+
+def backtest_symbol(
+    chart: dict[str, Any], symbol: str, side: str = "buy", **rule: Any
+) -> dict[str, Any]:
     days = features.sessions(chart)
+    trade_of = session_trade if side == "buy" else session_trade_short
     by_k: dict[str, Any] = {}
     for k in KS:
         trades = []
@@ -179,7 +267,7 @@ def backtest_symbol(chart: dict[str, Any], symbol: str, **rule: Any) -> dict[str
             atr = atr_before(days, d)
             if atr is None:
                 continue
-            t = session_trade(days[d], atr, k, **rule)
+            t = trade_of(days[d], atr, k, **rule)
             if t:
                 trades.append(t | {"date": d})
         by_k[f"{k:g}R"] = {"stats": stats(trades), "trades": trades}
@@ -187,6 +275,7 @@ def backtest_symbol(chart: dict[str, Any], symbol: str, **rule: Any) -> dict[str
     best = max(by_k, key=lambda key: (by_k[key]["stats"]["avg_r"], -float(key[:-1])))
     return {
         "symbol": symbol,
+        "side": side,
         "sessions": len(days),
         "best_t2": best,
         "best": by_k[best]["stats"],
@@ -260,6 +349,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offline-dir", type=Path, help="saved 60-day charts, SYM.json(.gz)")
     ap.add_argument("--refresh", action="store_true", help="ignore today's cached results")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument(
+        "--shorts", action="store_true", help="also replay the short side (on with allow_short)"
+    )
     a = ap.parse_args(argv)
 
     cfg = json.loads(a.config.read_text(encoding="utf-8")) if a.config.exists() else {}
@@ -278,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
     cache = a.out_dir / today
     cache.mkdir(parents=True, exist_ok=True)
 
-    results = []
+    results, charts = [], {}
     for sym in symbols:
         f = cache / f"{sym}.json"
         if f.exists() and not a.refresh and not a.offline_dir:
@@ -287,12 +379,32 @@ def main(argv: list[str] | None = None) -> int:
                 results.append(cached)
                 continue
         try:
-            res = backtest_symbol(get_chart(sym, a.offline_dir), sym, **rule) | {"rule": rule}
+            charts[sym] = get_chart(sym, a.offline_dir)
+            res = backtest_symbol(charts[sym], sym, **rule) | {"rule": rule}
         except (OSError, RuntimeError, ValueError) as e:
             results.append({"symbol": sym, "error": str(e)[:160]})
             continue
         f.write_text(json.dumps(res) + "\n", encoding="utf-8")
         results.append(res)
+
+    shorts: dict[str, dict[str, Any]] = {}
+    if a.shorts or cfg.get("allow_short"):
+        for sym in symbols:
+            f = cache / f"{sym}-short.json"
+            if f.exists() and not a.refresh and not a.offline_dir:
+                cached = json.loads(f.read_text(encoding="utf-8"))
+                if cached.get("rule") == rule:
+                    shorts[sym] = cached
+                    continue
+            try:
+                chart = charts.get(sym) or get_chart(sym, a.offline_dir)
+                res = backtest_symbol(chart, sym, "sell", **rule) | {"rule": rule}
+            except (OSError, RuntimeError, ValueError):
+                continue
+            f.write_text(json.dumps(res) + "\n", encoding="utf-8")
+            shorts[sym] = res
+        for r in shorts.values():
+            r["verdict"] = verdict(r, a.min_trades)
 
     ok = [r for r in results if "error" not in r]
     ranked = rank(ok, a.min_trades)
@@ -305,7 +417,14 @@ def main(argv: list[str] | None = None) -> int:
             {"symbol": r["symbol"], "verdict": r["verdict"], "t2": r["best_t2"], **r["best"]}
             for r in ranked
         ],
-        "dropped": [r["symbol"] for r in ok if r["verdict"] == "drop"],
+        "dropped": [
+            r["symbol"]
+            for r in ok
+            if r["verdict"] == "drop" and (shorts.get(r["symbol"]) or {}).get("verdict") != "keep"
+        ],
+        "shorts": {
+            s: {"verdict": r["verdict"], "t2": r["best_t2"], **r["best"]} for s, r in shorts.items()
+        },
         "errors": {r["symbol"]: r["error"] for r in results if "error" in r},
     }
     (cache / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -314,18 +433,23 @@ def main(argv: list[str] | None = None) -> int:
         info = {r["symbol"]: r for r in ranked}
         old = {h["symbol"].upper(): h for h in doc.get("hits", [])}
         errored = [s for s in symbols if s in summary["errors"]]  # no data: kept, unranked
-        doc["hits"] = [
-            old[s]
-            | {
-                "backtest": {
-                    "verdict": info[s]["verdict"],
-                    "t2": info[s]["best_t2"],
-                    **{k: info[s]["best"][k] for k in ("n", "avg_r", "win_rate")},
-                }
+        short_only = [  # the long side lost, the short side made money: kept for shorts
+            s for s, r in shorts.items() if r["verdict"] == "keep" and s not in info
+        ]
+
+        def brief(r: dict[str, Any]) -> dict[str, Any]:
+            return {"verdict": r["verdict"], "t2": r["best_t2"]} | {
+                k: r["best"][k] for k in ("n", "avg_r", "win_rate")
             }
-            for s in info
-            if s in old
-        ] + [old[s] for s in errored if s in old]
+
+        def with_shorts(s: str, h: dict[str, Any]) -> dict[str, Any]:
+            return h | ({"short_backtest": brief(shorts[s])} if s in shorts else {})
+
+        doc["hits"] = (
+            [with_shorts(s, old[s] | {"backtest": brief(info[s])}) for s in info if s in old]
+            + [with_shorts(s, old[s]) for s in short_only if s in old]
+            + [old[s] for s in errored if s in old]
+        )
         doc["dropped"] = summary["dropped"]
         doc["backtest"] = str(cache / "summary.json")
         a.shortlist.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
